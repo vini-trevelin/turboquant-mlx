@@ -21,6 +21,7 @@ dev = ["pytest"]
 turboquant-calibrate = "turboquant_mlx.calibration:main"
 turboquant-needle = "turboquant_mlx.needle:main"
 turboquant-longbench = "turboquant_mlx.longbench:main"
+turboquant-parity = "turboquant_mlx.teacher_forcing:main"
 turboquant-report = "turboquant_mlx.reporting:main"
 
 [tool.setuptools.packages.find]

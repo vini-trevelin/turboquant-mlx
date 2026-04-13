@@ -2,119 +2,66 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import shutil
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Mapping, Optional
 
 import mlx.core as mx
 
 from .calibration import calibrate_outlier_mask
-from .config import CalibrationConfig, TurboQuantConfig
-from .generate import append_jsonl
-from .longbench import evaluate_longbench
+from .config import CalibrationArtifact, CalibrationConfig, EvaluationConfig, TurboQuantConfig
+from .longbench import evaluate_longbench_loaded, prepare_longbench_examples
 from .load import load_turboquant
 from .needle import build_needle_case, run_loaded_needle_case
+from .qa_eval import write_jsonl
+from .teacher_forcing import evaluate_teacher_forced_loaded
 
 
-DEFAULT_LONG_DATASETS = [
-    "lcc_e",
-    "trec_e",
-]
-DEFAULT_CALIBRATION_DATASETS = [
-    "multifieldqa_en",
-    "multi_news",
-]
+DEFAULT_QUALITY_DATASETS = ["triviaqa_e", "hotpotqa_e", "2wikimqa_e"]
+DEFAULT_CALIBRATION_DATASETS = ["multifieldqa_en", "multi_news"]
+DEFAULT_DIAGNOSTIC_DATASETS = ["lcc_e", "trec_e"]
+DEFAULT_CONTEXT_TIERS = [512, 2048, 4096]
 
 
-@dataclass
+@dataclass(frozen=True)
 class ModeSpec:
     slug: str
     label: str
     config: Optional[TurboQuantConfig]
+    headline: bool = False
+    diagnostic: bool = False
 
 
-def _read_jsonl(path: Path) -> List[dict]:
-    rows = []
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if line:
-                rows.append(json.loads(line))
-    return rows
+def _parse_csv_list(value: str) -> List[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def _write_jsonl(path: Path, rows: Iterable[dict]) -> None:
+def _parse_int_list(value: str) -> List[int]:
+    return [int(item.strip()) for item in value.split(",") if item.strip()]
+
+
+def _mean(values: Iterable[float]) -> float:
+    values = list(values)
+    return sum(values) / len(values) if values else 0.0
+
+
+def _write_json(path: Path, payload: Mapping) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=True) + "\n")
+    path.write_text(json.dumps(payload, indent=2))
 
 
-def _build_prompt_text(example: dict) -> str:
-    return "\n\n".join(
-        part
-        for part in [
-            f"Context:\n{example.get('context', '')}".strip(),
-            f"Question:\n{example.get('input', '')}".strip(),
-        ]
-        if part
-    )
-
-
-def _truncate_words(text: str, limit: Optional[int]) -> str:
-    if limit is None:
-        return text
-    words = text.split()
-    if len(words) <= limit:
-        return text
-    return " ".join(words[:limit])
-
-
-def build_dataset_slices(
-    source_dir: Path,
-    output_dir: Path,
-    *,
-    eval_examples_per_dataset: int = 1,
-    calibration_examples_per_dataset: int = 2,
-    context_word_limit: Optional[int] = 120,
-) -> tuple[Path, Path]:
-    datasets_dir = output_dir / "datasets"
-    datasets_dir.mkdir(parents=True, exist_ok=True)
-
-    eval_rows: List[dict] = []
-    for dataset_name in DEFAULT_LONG_DATASETS:
-        rows = _read_jsonl(source_dir / f"{dataset_name}.jsonl")
-        for row in rows[:eval_examples_per_dataset]:
-            eval_rows.append(
-                {
-                    **row,
-                    "context": _truncate_words(row.get("context", ""), context_word_limit),
-                }
-            )
-
-    calibration_rows: List[dict] = []
-    for dataset_name in DEFAULT_CALIBRATION_DATASETS:
-        rows = _read_jsonl(source_dir / f"{dataset_name}.jsonl")
-        for row in rows[:calibration_examples_per_dataset]:
-            calibration_rows.append(
-                {
-                    "text": _build_prompt_text(
-                        {
-                            **row,
-                            "context": _truncate_words(row.get("context", ""), context_word_limit),
-                        }
-                    )
-                }
-            )
-
-    eval_path = datasets_dir / "longbench_eval_slice.jsonl"
-    calibration_path = datasets_dir / "calibration_prompts.jsonl"
-    _write_jsonl(eval_path, eval_rows)
-    _write_jsonl(calibration_path, calibration_rows)
-    return eval_path, calibration_path
+def _serializable_prepared_example(example: Mapping) -> dict:
+    return {
+        "dataset": example["_dataset_name"],
+        "index": example["_index"],
+        "prompt": example["_prompt"],
+        "prompt_token_target": example["_prompt_token_target"],
+        "prompt_token_count": example["_prompt_token_count"],
+        "context_token_count": example["_context_token_count"],
+        "answers": example.get("answers") or [example.get("answer", "")],
+    }
 
 
 def _format_float(value: float) -> str:
@@ -178,12 +125,13 @@ def _bar_chart_svg(
 
 def _line_chart_svg(
     title: str,
-    series: dict[str, List[float]],
+    series: Mapping[str, List[float]],
     x_labels: List[str],
     *,
     subtitle: str = "",
     width: int = 960,
     height: int = 520,
+    formatter=_format_float,
 ) -> str:
     if not series:
         raise ValueError("line chart requires series")
@@ -208,13 +156,10 @@ def _line_chart_svg(
         y = origin_y - chart_height * i / 4
         parts.append(f'<line x1="{left}" y1="{y}" x2="{width-right}" y2="{y}" stroke="#E2E8F0" stroke-width="1"/>')
         parts.append(
-            f'<text x="{left-14}" y="{y+5}" text-anchor="end" font-size="12" font-family="Menlo, Monaco, monospace" fill="#64748B">{tick_value:.2f}</text>'
+            f'<text x="{left-14}" y="{y+5}" text-anchor="end" font-size="12" font-family="Menlo, Monaco, monospace" fill="#64748B">{formatter(tick_value)}</text>'
         )
 
-    if len(x_labels) == 1:
-        xs = [left + chart_width / 2]
-    else:
-        xs = [left + i * (chart_width / (len(x_labels) - 1)) for i in range(len(x_labels))]
+    xs = [left + chart_width / 2] if len(x_labels) == 1 else [left + i * (chart_width / (len(x_labels) - 1)) for i in range(len(x_labels))]
     for x, label in zip(xs, x_labels):
         parts.append(f'<line x1="{x}" y1="{top}" x2="{x}" y2="{origin_y}" stroke="#E2E8F0" stroke-width="1"/>')
         parts.append(
@@ -233,7 +178,7 @@ def _line_chart_svg(
         for x, y, value in points:
             parts.append(f'<circle cx="{x}" cy="{y}" r="5" fill="{color}"/>')
             parts.append(
-                f'<text x="{x}" y="{y-10}" text-anchor="middle" font-size="12" font-family="Menlo, Monaco, monospace" fill="{color}">{value:.2f}</text>'
+                f'<text x="{x}" y="{y-10}" text-anchor="middle" font-size="12" font-family="Menlo, Monaco, monospace" fill="{color}">{formatter(value)}</text>'
             )
         parts.append(f'<rect x="{legend_x}" y="{legend_y-10}" width="14" height="14" rx="3" fill="{color}"/>')
         parts.append(
@@ -244,19 +189,68 @@ def _line_chart_svg(
     return "\n".join(parts)
 
 
-def _safe_slug(value: str) -> str:
-    return value.replace(".", "p").replace("-", "_")
+def _scatter_chart_svg(
+    title: str,
+    points: List[dict],
+    *,
+    subtitle: str = "",
+    width: int = 960,
+    height: int = 520,
+) -> str:
+    if not points:
+        raise ValueError("scatter chart requires at least one point")
+    max_x = max(point["x"] for point in points) or 1.0
+    max_y = max(point["y"] for point in points) or 1.0
+    left, right, top, bottom = 90, 40, 110, 100
+    chart_width = width - left - right
+    chart_height = height - top - bottom
+    origin_y = top + chart_height
+    colors = {
+        "standard": "#2463EB",
+        "preset_3p5_qjl": "#059669",
+        "preset_2p5_qjl": "#EA580C",
+        "core_4bit": "#7C3AED",
+    }
+
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="#F8FAFC"/>',
+        f'<text x="{left}" y="44" font-size="28" font-family="Menlo, Monaco, monospace" fill="#0F172A">{title}</text>',
+    ]
+    if subtitle:
+        parts.append(
+            f'<text x="{left}" y="72" font-size="14" font-family="Menlo, Monaco, monospace" fill="#475569">{subtitle}</text>'
+        )
+    for i in range(5):
+        x = left + chart_width * i / 4
+        y = origin_y - chart_height * i / 4
+        x_value = max_x * i / 4
+        y_value = max_y * i / 4
+        parts.append(f'<line x1="{x}" y1="{top}" x2="{x}" y2="{origin_y}" stroke="#E2E8F0" stroke-width="1"/>')
+        parts.append(f'<line x1="{left}" y1="{y}" x2="{width-right}" y2="{y}" stroke="#E2E8F0" stroke-width="1"/>')
+        parts.append(
+            f'<text x="{x}" y="{origin_y+26}" text-anchor="middle" font-size="12" font-family="Menlo, Monaco, monospace" fill="#64748B">{int(x_value):,}</text>'
+        )
+        parts.append(
+            f'<text x="{left-14}" y="{y+5}" text-anchor="end" font-size="12" font-family="Menlo, Monaco, monospace" fill="#64748B">{y_value:.3f}</text>'
+        )
+
+    for point in points:
+        x = left + (0 if max_x == 0 else chart_width * (point["x"] / max_x))
+        y = origin_y - (0 if max_y == 0 else chart_height * (point["y"] / max_y))
+        color = colors.get(point["mode_slug"], "#334155")
+        parts.append(f'<circle cx="{x}" cy="{y}" r="7" fill="{color}" opacity="0.9"/>')
+        parts.append(
+            f'<text x="{x+10}" y="{y-10}" font-size="12" font-family="Menlo, Monaco, monospace" fill="#0F172A">{point["label"]}</text>'
+        )
+    parts.append("</svg>")
+    return "\n".join(parts)
 
 
-def _mode_specs(head_dim: int, calibration_artifact_path: Path) -> List[ModeSpec]:
+def _mode_specs(head_dim: int, calibration_artifact_path: Path, *, headline_only: bool = False) -> List[ModeSpec]:
     calibration = CalibrationConfig(artifact_path=str(calibration_artifact_path))
-    return [
+    modes = [
         ModeSpec(slug="standard", label="Standard KV", config=None),
-        ModeSpec(
-            slug="core_4bit",
-            label="Core 4-bit MSE",
-            config=TurboQuantConfig(mode="core", head_dim=head_dim, core_bits=4),
-        ),
         ModeSpec(
             slug="preset_3p5_qjl",
             label="Preset 3.5-bit + QJL",
@@ -268,8 +262,550 @@ def _mode_specs(head_dim: int, calibration_artifact_path: Path) -> List[ModeSpec
                 qjl_enabled=True,
                 qjl_dim=64,
             ),
+            headline=True,
         ),
     ]
+    if headline_only:
+        return modes
+    modes.extend(
+        [
+            ModeSpec(
+                slug="core_4bit",
+                label="Core 4-bit MSE",
+                config=TurboQuantConfig(mode="core", head_dim=head_dim, core_bits=4),
+                diagnostic=True,
+            ),
+            ModeSpec(
+                slug="preset_2p5_qjl",
+                label="Preset 2.5-bit + QJL",
+                config=TurboQuantConfig(
+                    mode="preset",
+                    head_dim=head_dim,
+                    preset_name="2.5",
+                    calibration=calibration,
+                    qjl_enabled=True,
+                    qjl_dim=64,
+                ),
+                diagnostic=True,
+            ),
+        ]
+    )
+    return modes
+
+
+def _prepare_quality_slices(
+    source_dir: Path,
+    tokenizer,
+    output_dir: Path,
+    *,
+    dataset_names: List[str],
+    context_tiers: List[int],
+    examples_per_dataset: int,
+) -> dict[int, dict[str, List[dict]]]:
+    datasets_dir = output_dir / "datasets"
+    datasets_dir.mkdir(parents=True, exist_ok=True)
+    prepared_by_tier: dict[int, dict[str, List[dict]]] = {tier: {} for tier in context_tiers}
+
+    for tier in context_tiers:
+        for dataset_name in dataset_names:
+            path = source_dir / f"{dataset_name}.jsonl"
+            prepared = prepare_longbench_examples(
+                path,
+                tokenizer,
+                prompt_token_limit=tier,
+                max_examples=examples_per_dataset,
+                dataset_name=dataset_name,
+            )
+            prepared_by_tier[tier][dataset_name] = prepared
+            serializable_rows = [_serializable_prepared_example(example) for example in prepared]
+            write_jsonl(datasets_dir / f"{dataset_name}_ctx{tier}.jsonl", serializable_rows)
+    return prepared_by_tier
+
+
+def _prepare_calibration_texts(
+    source_dir: Path,
+    tokenizer,
+    output_dir: Path,
+    *,
+    dataset_names: List[str],
+    examples_per_dataset: int,
+    prompt_token_limit: int,
+) -> List[str]:
+    rows: List[dict] = []
+    texts: List[str] = []
+    for dataset_name in dataset_names:
+        prepared = prepare_longbench_examples(
+            source_dir / f"{dataset_name}.jsonl",
+            tokenizer,
+            prompt_token_limit=prompt_token_limit,
+            max_examples=examples_per_dataset,
+            dataset_name=dataset_name,
+        )
+        for prepared_example in prepared:
+            text = prepared_example["_prompt"]
+            texts.append(text)
+            rows.append({"dataset": dataset_name, "text": text})
+    write_jsonl(output_dir / "datasets" / "calibration_prompts.jsonl", rows)
+    return texts
+
+
+def _build_diagnostic_slice(
+    source_dir: Path,
+    tokenizer,
+    output_dir: Path,
+    *,
+    dataset_names: List[str],
+    prompt_token_limit: int,
+) -> Path:
+    rows = []
+    for dataset_name in dataset_names:
+        prepared = prepare_longbench_examples(
+            source_dir / f"{dataset_name}.jsonl",
+            tokenizer,
+            prompt_token_limit=prompt_token_limit,
+            max_examples=1,
+            dataset_name=dataset_name,
+        )
+        rows.extend(_serializable_prepared_example(example) for example in prepared)
+    path = output_dir / "datasets" / "diagnostic_longbench.jsonl"
+    write_jsonl(path, rows)
+    return path
+
+
+def _summarize_quality_rows(rows: List[dict]) -> List[dict]:
+    grouped: dict[tuple[str, int], List[dict]] = {}
+    for row in rows:
+        grouped.setdefault((row["mode_slug"], row["context_tier"]), []).append(row)
+    summary = []
+    for (mode_slug, context_tier), group in sorted(grouped.items(), key=lambda item: (item[0][1], item[0][0])):
+        summary.append(
+            {
+                "mode_slug": mode_slug,
+                "mode_label": group[0]["mode_label"],
+                "context_tier": context_tier,
+                "examples": len(group),
+                "mean_em": _mean(row["em"] for row in group),
+                "mean_f1": _mean(row["f1"] for row in group),
+                "mean_headline_score": _mean(row["headline_score"] for row in group),
+                "prompt_tps_mean": _mean(row["prompt_tps"] for row in group),
+                "generation_tps_mean": _mean(row["generation_tps"] for row in group),
+                "cache_nbytes_mean": _mean(row["cache_nbytes"] for row in group),
+                "peak_memory_delta_bytes_mean": _mean(row["peak_memory_delta_bytes"] for row in group),
+                "prefill_seconds_mean": _mean(row["prefill_seconds"] for row in group),
+                "decode_seconds_mean": _mean(row["decode_seconds"] for row in group),
+            }
+        )
+    return summary
+
+
+def _summarize_needle_rows(rows: List[dict]) -> List[dict]:
+    grouped: dict[tuple[str, int], List[dict]] = {}
+    for row in rows:
+        grouped.setdefault((row["mode_slug"], row["context_tier"]), []).append(row)
+    summary = []
+    for (mode_slug, context_tier), group in sorted(grouped.items(), key=lambda item: (item[0][1], item[0][0])):
+        summary.append(
+            {
+                "mode_slug": mode_slug,
+                "mode_label": group[0]["mode_label"],
+                "context_tier": context_tier,
+                "examples": len(group),
+                "accuracy_mean": _mean(row["correct"] for row in group),
+                "prompt_tps_mean": _mean(row["prompt_tps"] for row in group),
+                "generation_tps_mean": _mean(row["generation_tps"] for row in group),
+                "cache_nbytes_mean": _mean(row["cache_nbytes"] for row in group),
+                "peak_memory_delta_bytes_mean": _mean(row["peak_memory_delta_bytes"] for row in group),
+            }
+        )
+    return summary
+
+
+def _summarize_parity_rows(rows: List[dict]) -> List[dict]:
+    grouped: dict[int, List[dict]] = {}
+    for row in rows:
+        grouped.setdefault(row["context_tier"], []).append(row)
+    summary = []
+    for context_tier, group in sorted(grouped.items()):
+        summary.append(
+            {
+                "context_tier": context_tier,
+                "examples": len(group),
+                "top1_agreement_mean": _mean(row["top1_agreement"] for row in group),
+                "top5_overlap_mean": _mean(row["top5_overlap"] for row in group),
+                "kl_divergence_mean": _mean(row["kl_divergence_mean"] for row in group),
+            }
+        )
+    return summary
+
+
+def _find_summary_row(summary: List[dict], *, mode_slug: str, context_tier: int) -> Optional[dict]:
+    for row in summary:
+        if row.get("mode_slug") == mode_slug and row.get("context_tier") == context_tier:
+            return row
+    return None
+
+
+def _build_acceptance_summary(
+    quality_summary: List[dict],
+    needle_summary: List[dict],
+    *,
+    headline_mode_slug: str = "preset_3p5_qjl",
+    standard_mode_slug: str = "standard",
+) -> dict:
+    context_tiers = sorted({row["context_tier"] for row in quality_summary})
+    per_tier = []
+    overall_pass = True
+    for tier in context_tiers:
+        quality_standard = _find_summary_row(quality_summary, mode_slug=standard_mode_slug, context_tier=tier)
+        quality_headline = _find_summary_row(quality_summary, mode_slug=headline_mode_slug, context_tier=tier)
+        needle_standard = _find_summary_row(needle_summary, mode_slug=standard_mode_slug, context_tier=tier)
+        needle_headline = _find_summary_row(needle_summary, mode_slug=headline_mode_slug, context_tier=tier)
+        if not all([quality_standard, quality_headline, needle_standard, needle_headline]):
+            continue
+
+        cache_reduction = (
+            quality_standard["cache_nbytes_mean"] / quality_headline["cache_nbytes_mean"]
+            if quality_headline["cache_nbytes_mean"]
+            else 0.0
+        )
+        qa_f1_delta = quality_headline["mean_f1"] - quality_standard["mean_f1"]
+        needle_delta = needle_headline["accuracy_mean"] - needle_standard["accuracy_mean"]
+        tier_pass = cache_reduction >= 3.0 and qa_f1_delta >= -0.03 and needle_delta >= -0.02
+        per_tier.append(
+            {
+                "context_tier": tier,
+                "cache_reduction": cache_reduction,
+                "qa_f1_delta": qa_f1_delta,
+                "needle_accuracy_delta": needle_delta,
+                "pass": tier_pass,
+            }
+        )
+        overall_pass = overall_pass and tier_pass
+    return {
+        "headline_mode_slug": headline_mode_slug,
+        "overall_pass": overall_pass,
+        "cache_reduction_threshold": 3.0,
+        "qa_f1_delta_threshold": -0.03,
+        "needle_accuracy_delta_threshold": -0.02,
+        "per_tier": per_tier,
+    }
+
+
+def _run_quality_suite_loaded(
+    model,
+    tokenizer,
+    mode: ModeSpec,
+    prepared_by_tier: dict[int, dict[str, List[dict]]],
+    *,
+    max_tokens: int,
+) -> List[dict]:
+    rows: List[dict] = []
+    for tier, datasets in prepared_by_tier.items():
+        for dataset_name, prepared_examples in datasets.items():
+            result = evaluate_longbench_loaded(
+                model,
+                tokenizer,
+                prepared_examples,
+                max_tokens=max_tokens,
+                turboquant_config=mode.config,
+            )
+            for row in result["rows"]:
+                row["mode_slug"] = mode.slug
+                row["mode_label"] = mode.label
+                row["context_tier"] = tier
+                row["dataset_name"] = dataset_name
+                rows.append(row)
+    return rows
+
+
+def _run_needle_suite_loaded(
+    model,
+    tokenizer,
+    mode: ModeSpec,
+    *,
+    context_tiers: List[int],
+    seeds_per_position: int,
+    max_tokens: int,
+) -> List[dict]:
+    rows: List[dict] = []
+    for tier in context_tiers:
+        for position_label in ("front", "middle", "back"):
+            for seed in range(seeds_per_position):
+                case = build_needle_case(
+                    tokenizer,
+                    context_tokens=tier,
+                    needle="The launch code is 314159.",
+                    question="What is the launch code?",
+                    needle_position=position_label,
+                    seed=seed,
+                )
+                row = run_loaded_needle_case(
+                    model=model,
+                    tokenizer=tokenizer,
+                    case=case,
+                    max_tokens=max_tokens,
+                    model_label="loaded-model",
+                    turboquant_config=mode.config,
+                )
+                row["mode_slug"] = mode.slug
+                row["mode_label"] = mode.label
+                row["context_tier"] = tier
+                rows.append(row)
+    return rows
+
+
+def _run_parity_suite(
+    standard_model,
+    headline_model,
+    prepared_by_tier: dict[int, dict[str, List[dict]]],
+    *,
+    context_tiers: List[int],
+    examples_per_dataset: int,
+) -> List[dict]:
+    rows: List[dict] = []
+    for tier in context_tiers:
+        for dataset_name, examples in prepared_by_tier[tier].items():
+            for example in examples[:examples_per_dataset]:
+                metrics = evaluate_teacher_forced_loaded(
+                    standard_model,
+                    headline_model,
+                    example["_prompt_tokens"],
+                )
+                rows.append(
+                    {
+                        "context_tier": tier,
+                        "dataset": dataset_name,
+                        "index": example["_index"],
+                        **metrics.to_dict(),
+                    }
+                )
+    return rows
+
+
+def _generate_plots(
+    plots_dir: Path,
+    *,
+    quality_summary: List[dict],
+    needle_summary: List[dict],
+    parity_summary: List[dict],
+    acceptance: dict,
+) -> None:
+    tiers = sorted({row["context_tier"] for row in quality_summary})
+    tier_labels = [str(tier) for tier in tiers]
+    mode_order = []
+    for row in quality_summary:
+        if row["mode_slug"] not in mode_order:
+            mode_order.append(row["mode_slug"])
+
+    quality_series = {}
+    cache_series = {}
+    peak_series = {}
+    prompt_tps_series = {}
+    generation_tps_series = {}
+    needle_series = {}
+    for mode_slug in mode_order:
+        mode_rows = [row for row in quality_summary if row["mode_slug"] == mode_slug]
+        mode_label = mode_rows[0]["mode_label"]
+        quality_series[mode_label] = [
+            _find_summary_row(quality_summary, mode_slug=mode_slug, context_tier=tier)["mean_f1"] for tier in tiers
+        ]
+        cache_series[mode_label] = [
+            _find_summary_row(quality_summary, mode_slug=mode_slug, context_tier=tier)["cache_nbytes_mean"] for tier in tiers
+        ]
+        peak_series[mode_label] = [
+            _find_summary_row(quality_summary, mode_slug=mode_slug, context_tier=tier)["peak_memory_delta_bytes_mean"] for tier in tiers
+        ]
+        prompt_tps_series[mode_label] = [
+            _find_summary_row(quality_summary, mode_slug=mode_slug, context_tier=tier)["prompt_tps_mean"] for tier in tiers
+        ]
+        generation_tps_series[mode_label] = [
+            _find_summary_row(quality_summary, mode_slug=mode_slug, context_tier=tier)["generation_tps_mean"] for tier in tiers
+        ]
+        needle_series[mode_label] = [
+            _find_summary_row(needle_summary, mode_slug=mode_slug, context_tier=tier)["accuracy_mean"] for tier in tiers
+        ]
+
+    standard_quality = {row["context_tier"]: row["mean_f1"] for row in quality_summary if row["mode_slug"] == "standard"}
+    delta_series = {}
+    for mode_slug in mode_order:
+        if mode_slug == "standard":
+            continue
+        mode_rows = [row for row in quality_summary if row["mode_slug"] == mode_slug]
+        mode_label = mode_rows[0]["mode_label"]
+        delta_series[mode_label] = [
+            _find_summary_row(quality_summary, mode_slug=mode_slug, context_tier=tier)["mean_f1"] - standard_quality[tier]
+            for tier in tiers
+        ]
+
+    tradeoff_points = []
+    for row in quality_summary:
+        tradeoff_points.append(
+            {
+                "mode_slug": row["mode_slug"],
+                "x": row["cache_nbytes_mean"],
+                "y": row["mean_f1"],
+                "label": f"{row['mode_label']}@{row['context_tier']}",
+            }
+        )
+
+    (plots_dir / "quality_vs_context.svg").write_text(
+        _line_chart_svg(
+            "Quality vs Context Length",
+            quality_series,
+            tier_labels,
+            subtitle="Mean token-F1 on curated long-context QA tasks",
+        )
+    )
+    (plots_dir / "quality_delta_vs_standard.svg").write_text(
+        _line_chart_svg(
+            "Quality Delta vs Standard",
+            delta_series,
+            tier_labels,
+            subtitle="Mean F1 difference relative to Standard KV",
+        )
+    )
+    (plots_dir / "cache_bytes_vs_context.svg").write_text(
+        _line_chart_svg(
+            "Observed Cache Bytes vs Context Length",
+            cache_series,
+            tier_labels,
+            subtitle="Mean observed prompt cache bytes",
+            formatter=lambda value: f"{int(value):,}",
+        )
+    )
+    (plots_dir / "peak_memory_delta_vs_context.svg").write_text(
+        _line_chart_svg(
+            "Peak Memory Delta vs Context Length",
+            peak_series,
+            tier_labels,
+            subtitle="Per-run peak memory delta in bytes",
+            formatter=lambda value: f"{int(value):,}",
+        )
+    )
+    (plots_dir / "prompt_tps_vs_context.svg").write_text(
+        _line_chart_svg(
+            "Prompt Tokens / Second vs Context Length",
+            prompt_tps_series,
+            tier_labels,
+            subtitle="Prefill throughput",
+        )
+    )
+    (plots_dir / "generation_tps_vs_context.svg").write_text(
+        _line_chart_svg(
+            "Generation Tokens / Second vs Context Length",
+            generation_tps_series,
+            tier_labels,
+            subtitle="Decode throughput",
+        )
+    )
+    (plots_dir / "quality_memory_tradeoff.svg").write_text(
+        _scatter_chart_svg(
+            "Quality vs Memory Tradeoff",
+            tradeoff_points,
+            subtitle="Each point is a mode/context-tier mean",
+        )
+    )
+    (plots_dir / "needle_accuracy_vs_context.svg").write_text(
+        _line_chart_svg(
+            "Needle Accuracy vs Context Length",
+            needle_series,
+            tier_labels,
+            subtitle="Structured short-answer matching",
+        )
+    )
+
+    if parity_summary:
+        (plots_dir / "parity_kl_vs_context.svg").write_text(
+            _bar_chart_svg(
+                "Teacher-Forced KL vs Context Length",
+                tier_labels,
+                [row["kl_divergence_mean"] for row in parity_summary],
+                subtitle="Standard KV vs Preset 3.5 + QJL",
+                color="#0F766E",
+            )
+        )
+
+    if acceptance["per_tier"]:
+        (plots_dir / "headline_cache_reduction.svg").write_text(
+            _bar_chart_svg(
+                "Headline Cache Reduction",
+                [str(row["context_tier"]) for row in acceptance["per_tier"]],
+                [row["cache_reduction"] for row in acceptance["per_tier"]],
+                subtitle="Standard KV bytes divided by Preset 3.5 + QJL bytes",
+                color="#059669",
+            )
+        )
+
+
+def _write_annotations(
+    annotations_dir: Path,
+    *,
+    model: str,
+    quality_summary: List[dict],
+    needle_summary: List[dict],
+    parity_summary: List[dict],
+    acceptance: dict,
+    context_tiers: List[int],
+) -> None:
+    headline_mode = "preset_3p5_qjl"
+    status = "PASS" if acceptance["overall_pass"] else "NOT YET"
+    headline_rows = [row for row in quality_summary if row["mode_slug"] == headline_mode]
+    standard_rows = [row for row in quality_summary if row["mode_slug"] == "standard"]
+    smallest_cache = min(headline_rows, key=lambda row: row["cache_nbytes_mean"]) if headline_rows else None
+    best_standard = max(standard_rows, key=lambda row: row["mean_f1"]) if standard_rows else None
+    summary_lines = [
+        "# Validation Summary",
+        "",
+        f"Model: `{model}`",
+        "",
+        f"Headline claim status: `{status}`",
+        "",
+        "## Claim",
+        "",
+        "`Preset 3.5 + QJL` should use materially less KV-cache memory than `Standard KV` while keeping quality within a small drop.",
+        "",
+        "## Acceptance by Context Tier",
+        "",
+    ]
+    for row in acceptance["per_tier"]:
+        summary_lines.append(
+            f"- `{row['context_tier']}` tokens: cache reduction `{row['cache_reduction']:.2f}x`, QA F1 delta `{row['qa_f1_delta']:.3f}`, Needle delta `{row['needle_accuracy_delta']:.3f}`, pass=`{row['pass']}`"
+        )
+    summary_lines.extend(
+        [
+            "",
+            "## Notes",
+            "",
+            "- Quality uses curated exact-answer-friendly LongBench datasets with normalized EM and token-F1.",
+            "- Needle uses canonical short-answer matching, including numeric recovery such as `314159` for the launch-code prompt.",
+            "- Memory proof should be read primarily from `cache_nbytes` and secondarily from per-run peak-memory delta.",
+            "- Throughput is reported for visibility, but it is not a pass/fail gate in this phase.",
+        ]
+    )
+    if smallest_cache is not None:
+        summary_lines.append(
+            f"- Smallest headline cache footprint: `{int(smallest_cache['cache_nbytes_mean']):,}` bytes at `{smallest_cache['context_tier']}` tokens."
+        )
+    if best_standard is not None:
+        summary_lines.append(
+            f"- Best baseline QA F1: `{best_standard['mean_f1']:.3f}` at `{best_standard['context_tier']}` tokens."
+        )
+    if parity_summary:
+        worst_parity = max(parity_summary, key=lambda row: row["kl_divergence_mean"])
+        summary_lines.append(
+            f"- Worst teacher-forced KL in the headline comparison: `{worst_parity['kl_divergence_mean']:.4f}` at `{worst_parity['context_tier']}` tokens."
+        )
+    (annotations_dir / "SUMMARY.md").write_text("\n".join(summary_lines))
+
+    limitations_lines = [
+        "# Limitations",
+        "",
+        "- This report is a local 3B validation suite, not a paper-parity claim on the 8B setup.",
+        "- `Preset 3.5 + QJL` is the only mode used for the headline pass/fail decision; other modes remain diagnostic.",
+        "- Runtime is tracked but not gated. A pass on this report does not imply the current Python-level implementation is production-fast.",
+        "- Teacher-forced parity is a support signal about distribution drift, not a substitute for downstream task quality.",
+    ]
+    (annotations_dir / "LIMITATIONS.md").write_text("\n".join(limitations_lines))
 
 
 def run_report(
@@ -277,13 +813,24 @@ def run_report(
     model: str,
     longbench_source_dir: Path,
     output_root: Path,
-    eval_examples_per_dataset: int = 1,
+    context_tiers: List[int] | None = None,
+    quality_datasets: List[str] | None = None,
+    calibration_datasets: List[str] | None = None,
+    diagnostic_datasets: List[str] | None = None,
+    quality_examples_per_dataset: int = 10,
+    parity_examples_per_dataset: int = 1,
     calibration_examples_per_dataset: int = 2,
-    longbench_max_tokens: int = 24,
-    needle_context_words: int = 4096,
-    needle_max_tokens: int = 32,
-    context_word_limit: Optional[int] = 120,
+    quality_max_tokens: int = 24,
+    needle_max_tokens: int = 12,
+    needle_seeds_per_position: int = 4,
+    headline_only: bool = False,
+    include_diagnostic_longbench: bool = False,
 ) -> Path:
+    context_tiers = context_tiers or list(DEFAULT_CONTEXT_TIERS)
+    quality_datasets = quality_datasets or list(DEFAULT_QUALITY_DATASETS)
+    calibration_datasets = calibration_datasets or list(DEFAULT_CALIBRATION_DATASETS)
+    diagnostic_datasets = diagnostic_datasets or list(DEFAULT_DIAGNOSTIC_DATASETS)
+
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     result_dir = output_root / timestamp
     raw_dir = result_dir / "raw"
@@ -293,14 +840,32 @@ def run_report(
     plots_dir.mkdir(parents=True, exist_ok=True)
     annotations_dir.mkdir(parents=True, exist_ok=True)
 
-    eval_path, calibration_path = build_dataset_slices(
+    standard_model, tokenizer = load_turboquant(model, turboquant_config=None)
+    prepared_by_tier = _prepare_quality_slices(
         longbench_source_dir,
+        tokenizer,
         result_dir,
-        eval_examples_per_dataset=eval_examples_per_dataset,
-        calibration_examples_per_dataset=calibration_examples_per_dataset,
-        context_word_limit=context_word_limit,
+        dataset_names=quality_datasets,
+        context_tiers=context_tiers,
+        examples_per_dataset=quality_examples_per_dataset,
     )
-    calibration_texts = [row["text"] for row in _read_jsonl(calibration_path)]
+    calibration_texts = _prepare_calibration_texts(
+        longbench_source_dir,
+        tokenizer,
+        result_dir,
+        dataset_names=calibration_datasets,
+        examples_per_dataset=calibration_examples_per_dataset,
+        prompt_token_limit=max(context_tiers),
+    )
+    if include_diagnostic_longbench:
+        _build_diagnostic_slice(
+            longbench_source_dir,
+            tokenizer,
+            result_dir,
+            dataset_names=diagnostic_datasets,
+            prompt_token_limit=min(context_tiers),
+        )
+
     artifact = calibrate_outlier_mask(
         model,
         calibration_texts,
@@ -311,164 +876,128 @@ def run_report(
     calibration_artifact_path = raw_dir / "calibration_artifact.json"
     artifact.save(calibration_artifact_path)
 
-    head_dim = artifact.head_dim
-    modes = _mode_specs(head_dim, calibration_artifact_path)
-    longbench_summary = []
-    for mode in modes:
-        result = evaluate_longbench(
-            model,
-            str(eval_path),
-            turboquant_config=mode.config,
-            max_tokens=longbench_max_tokens,
-        )
-        mode_rows_path = raw_dir / f"longbench_{mode.slug}.jsonl"
-        _write_jsonl(mode_rows_path, result["rows"])
-        prompt_tps_mean = sum(row["prompt_tps"] for row in result["rows"]) / len(result["rows"])
-        generation_tps_mean = sum(row["generation_tps"] for row in result["rows"]) / len(result["rows"])
-        peak_memory_mean = sum(row["peak_memory_gb"] for row in result["rows"]) / len(result["rows"])
-        cache_nbytes_mean = sum(row["cache_nbytes"] for row in result["rows"]) / len(result["rows"])
-        longbench_summary.append(
-            {
-                "mode_slug": mode.slug,
-                "mode_label": mode.label,
-                "mean_score": result["mean_score"],
-                "examples": result["examples"],
-                "prompt_tps_mean": prompt_tps_mean,
-                "generation_tps_mean": generation_tps_mean,
-                "peak_memory_gb_mean": peak_memory_mean,
-                "cache_nbytes_mean": cache_nbytes_mean,
-            }
-        )
+    modes = _mode_specs(artifact.head_dim, calibration_artifact_path, headline_only=headline_only)
+    quality_rows = _run_quality_suite_loaded(
+        standard_model,
+        tokenizer,
+        modes[0],
+        prepared_by_tier,
+        max_tokens=quality_max_tokens,
+    )
+    needle_rows = _run_needle_suite_loaded(
+        standard_model,
+        tokenizer,
+        modes[0],
+        context_tiers=context_tiers,
+        seeds_per_position=needle_seeds_per_position,
+        max_tokens=needle_max_tokens,
+    )
 
-    needle_positions = [128, needle_context_words // 2, max(needle_context_words - 128, 128)]
-    needle_modes = modes
-    needle_rows = []
-    for mode in needle_modes:
-        loaded_model, tokenizer = load_turboquant(model, turboquant_config=mode.config)
+    headline_mode = next(mode for mode in modes if mode.headline)
+    headline_model, headline_tokenizer = load_turboquant(model, turboquant_config=headline_mode.config)
+    quality_rows.extend(
+        _run_quality_suite_loaded(
+            headline_model,
+            headline_tokenizer,
+            headline_mode,
+            prepared_by_tier,
+            max_tokens=quality_max_tokens,
+        )
+    )
+    needle_rows.extend(
+        _run_needle_suite_loaded(
+            headline_model,
+            headline_tokenizer,
+            headline_mode,
+            context_tiers=context_tiers,
+            seeds_per_position=needle_seeds_per_position,
+            max_tokens=needle_max_tokens,
+        )
+    )
+    parity_rows = _run_parity_suite(
+        standard_model,
+        headline_model,
+        prepared_by_tier,
+        context_tiers=context_tiers,
+        examples_per_dataset=parity_examples_per_dataset,
+    )
+
+    for mode in modes:
+        if mode.slug in {modes[0].slug, headline_mode.slug}:
+            continue
+        loaded_model, loaded_tokenizer = load_turboquant(model, turboquant_config=mode.config)
         try:
-            for position in needle_positions:
-                case = build_needle_case(
-                    context_words=needle_context_words,
-                    needle="The launch code is 314159.",
-                    question="What is the launch code?",
-                    needle_position=position,
-                    seed=42 + position,
+            quality_rows.extend(
+                _run_quality_suite_loaded(
+                    loaded_model,
+                    loaded_tokenizer,
+                    mode,
+                    prepared_by_tier,
+                    max_tokens=quality_max_tokens,
                 )
-                row = run_loaded_needle_case(
-                    model=loaded_model,
-                    tokenizer=tokenizer,
-                    case=case,
+            )
+            needle_rows.extend(
+                _run_needle_suite_loaded(
+                    loaded_model,
+                    loaded_tokenizer,
+                    mode,
+                    context_tiers=context_tiers,
+                    seeds_per_position=needle_seeds_per_position,
                     max_tokens=needle_max_tokens,
-                    model_label=model,
-                    turboquant_config=mode.config,
                 )
-                row["mode_slug"] = mode.slug
-                row["mode_label"] = mode.label
-                append_jsonl(raw_dir / "needle_results.jsonl", row)
-                needle_rows.append(row)
+            )
         finally:
             del loaded_model
-            del tokenizer
+            del loaded_tokenizer
             mx.clear_cache()
 
+    write_jsonl(raw_dir / "quality_rows.jsonl", quality_rows)
+    write_jsonl(raw_dir / "needle_rows.jsonl", needle_rows)
+    write_jsonl(raw_dir / "parity_rows.jsonl", parity_rows)
+
+    quality_summary = _summarize_quality_rows(quality_rows)
+    needle_summary = _summarize_needle_rows(needle_rows)
+    parity_summary = _summarize_parity_rows(parity_rows)
+    acceptance = _build_acceptance_summary(quality_summary, needle_summary)
     summary_payload = {
         "model": model,
         "timestamp": timestamp,
-        "context_word_limit": context_word_limit,
-        "calibration_artifact": asdict(artifact),
-        "longbench_summary": longbench_summary,
-        "needle_rows": needle_rows,
-        "eval_dataset_path": str(eval_path),
-        "calibration_dataset_path": str(calibration_path),
+        "context_tiers": context_tiers,
+        "quality_datasets": quality_datasets,
+        "calibration_datasets": calibration_datasets,
+        "evaluation_defaults": asdict(
+            EvaluationConfig(
+                model=model,
+                mode="preset",
+                suite="quality",
+                context_tier=context_tiers[0],
+                calibration_artifact_path=str(calibration_artifact_path),
+            )
+        ),
+        "calibration_artifact": asdict(CalibrationArtifact.load(calibration_artifact_path)),
+        "quality_summary": quality_summary,
+        "needle_summary": needle_summary,
+        "parity_summary": parity_summary,
+        "acceptance": acceptance,
     }
-    (raw_dir / "summary.json").write_text(json.dumps(summary_payload, indent=2))
+    _write_json(raw_dir / "summary.json", summary_payload)
 
-    labels = [row["mode_label"] for row in longbench_summary]
-    (plots_dir / "longbench_mean_score.svg").write_text(
-        _bar_chart_svg(
-            "LongBench-E Mean Score",
-            labels,
-            [row["mean_score"] for row in longbench_summary],
-            subtitle="Compact evaluation slice, exact-match style scoring",
-            color="#0F766E",
-        )
+    _generate_plots(
+        plots_dir,
+        quality_summary=quality_summary,
+        needle_summary=needle_summary,
+        parity_summary=parity_summary,
+        acceptance=acceptance,
     )
-    (plots_dir / "generation_tps.svg").write_text(
-        _bar_chart_svg(
-            "Generation Tokens / Second",
-            labels,
-            [row["generation_tps_mean"] for row in longbench_summary],
-            subtitle="Mean over the LongBench slice",
-            color="#2563EB",
-        )
+    _write_annotations(
+        annotations_dir,
+        model=model,
+        quality_summary=quality_summary,
+        needle_summary=needle_summary,
+        parity_summary=parity_summary,
+        acceptance=acceptance,
+        context_tiers=context_tiers,
     )
-    (plots_dir / "peak_memory_gb.svg").write_text(
-        _bar_chart_svg(
-            "Peak Memory (GB)",
-            labels,
-            [row["peak_memory_gb_mean"] for row in longbench_summary],
-            subtitle="Mean peak memory reported during generation",
-            color="#DC2626",
-        )
-    )
-    (plots_dir / "cache_nbytes.svg").write_text(
-        _bar_chart_svg(
-            "Observed Cache Size (bytes)",
-            labels,
-            [row["cache_nbytes_mean"] for row in longbench_summary],
-            subtitle="Mean observed prompt cache size",
-            color="#7C3AED",
-            formatter=lambda v: f"{int(v):,}",
-        )
-    )
-
-    needle_series = {}
-    for mode in needle_modes:
-        mode_rows = [row for row in needle_rows if row["mode_slug"] == mode.slug]
-        needle_series[mode.label] = [float(row["correct"]) for row in sorted(mode_rows, key=lambda r: r["needle_position"])]
-    (plots_dir / "needle_accuracy_by_position.svg").write_text(
-        _line_chart_svg(
-            "Needle Accuracy by Needle Position",
-            needle_series,
-            [str(position) for position in needle_positions],
-            subtitle="1.0 means exact recovery of the inserted answer string",
-        )
-    )
-
-    best_score = max(longbench_summary, key=lambda row: row["mean_score"])
-    fastest = max(longbench_summary, key=lambda row: row["generation_tps_mean"])
-    smallest_cache = min(longbench_summary, key=lambda row: row["cache_nbytes_mean"])
-    summary_md = f"""# TurboQuant Run Summary
-
-Model: `{model}`
-
-Result directory: `{result_dir}`
-
-## Highlights
-
-- Best LongBench mean score: `{best_score['mode_label']}` at `{best_score['mean_score']:.3f}`
-- Fastest generation: `{fastest['mode_label']}` at `{fastest['generation_tps_mean']:.3f}` tokens/s
-- Smallest observed cache: `{smallest_cache['mode_label']}` at `{int(smallest_cache['cache_nbytes_mean']):,}` bytes
-
-## Annotations
-
-- The run uses a compact held-out LongBench slice built from `{', '.join(DEFAULT_LONG_DATASETS)}` and a separate calibration slice from `{', '.join(DEFAULT_CALIBRATION_DATASETS)}`.
-- Each LongBench example in this first results pack is truncated to `{context_word_limit}` context words so the Python-level TurboQuant path can finish end-to-end on local hardware.
-- `Preset 3.5-bit + QJL` uses a fixed outlier mask calibrated at the `99.9` percentile on held-out prompts.
-- `Core 4-bit MSE` is the calibration-free reference path for the local adapter.
-- The `needle_accuracy_by_position.svg` chart helps separate retrieval breakage from general generation drift.
-
-## Files
-
-- Raw summaries: [`raw/summary.json`](raw/summary.json)
-- LongBench plots:
-  - [`plots/longbench_mean_score.svg`](plots/longbench_mean_score.svg)
-  - [`plots/generation_tps.svg`](plots/generation_tps.svg)
-  - [`plots/peak_memory_gb.svg`](plots/peak_memory_gb.svg)
-  - [`plots/cache_nbytes.svg`](plots/cache_nbytes.svg)
-- Needle plot: [`plots/needle_accuracy_by_position.svg`](plots/needle_accuracy_by_position.svg)
-"""
-    (annotations_dir / "SUMMARY.md").write_text(summary_md)
 
     latest = output_root / "latest"
     if latest.exists() or latest.is_symlink():
@@ -477,23 +1006,35 @@ Result directory: `{result_dir}`
         else:
             latest.unlink()
     latest.symlink_to(result_dir.name)
+
+    del standard_model
+    del tokenizer
+    del headline_model
+    del headline_tokenizer
+    mx.clear_cache()
     return result_dir
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run a compact TurboQuant results pack with plots.")
+    parser = argparse.ArgumentParser(description="Run the TurboQuant validation report.")
     parser.add_argument("--model", default="mlx-community/Llama-3.2-3B-Instruct-4bit")
     parser.add_argument(
         "--longbench-source-dir",
         default="/Users/vinitl/prog/turboquant-mlx/assets/longbench/data",
     )
     parser.add_argument("--output-root", default="/Users/vinitl/prog/turboquant-mlx/results")
-    parser.add_argument("--eval-examples-per-dataset", type=int, default=1)
+    parser.add_argument("--context-tiers", default="512,2048,4096")
+    parser.add_argument("--quality-datasets", default="triviaqa_e,hotpotqa_e,2wikimqa_e")
+    parser.add_argument("--calibration-datasets", default="multifieldqa_en,multi_news")
+    parser.add_argument("--diagnostic-datasets", default="lcc_e,trec_e")
+    parser.add_argument("--quality-examples-per-dataset", type=int, default=10)
+    parser.add_argument("--parity-examples-per-dataset", type=int, default=1)
     parser.add_argument("--calibration-examples-per-dataset", type=int, default=2)
-    parser.add_argument("--longbench-max-tokens", type=int, default=24)
-    parser.add_argument("--needle-context-words", type=int, default=4096)
-    parser.add_argument("--needle-max-tokens", type=int, default=32)
-    parser.add_argument("--context-word-limit", type=int, default=120)
+    parser.add_argument("--quality-max-tokens", type=int, default=24)
+    parser.add_argument("--needle-max-tokens", type=int, default=12)
+    parser.add_argument("--needle-seeds-per-position", type=int, default=4)
+    parser.add_argument("--headline-only", action="store_true")
+    parser.add_argument("--include-diagnostic-longbench", action="store_true")
     return parser
 
 
@@ -503,12 +1044,18 @@ def main() -> None:
         model=args.model,
         longbench_source_dir=Path(args.longbench_source_dir),
         output_root=Path(args.output_root),
-        eval_examples_per_dataset=args.eval_examples_per_dataset,
+        context_tiers=_parse_int_list(args.context_tiers),
+        quality_datasets=_parse_csv_list(args.quality_datasets),
+        calibration_datasets=_parse_csv_list(args.calibration_datasets),
+        diagnostic_datasets=_parse_csv_list(args.diagnostic_datasets),
+        quality_examples_per_dataset=args.quality_examples_per_dataset,
+        parity_examples_per_dataset=args.parity_examples_per_dataset,
         calibration_examples_per_dataset=args.calibration_examples_per_dataset,
-        longbench_max_tokens=args.longbench_max_tokens,
-        needle_context_words=args.needle_context_words,
+        quality_max_tokens=args.quality_max_tokens,
         needle_max_tokens=args.needle_max_tokens,
-        context_word_limit=args.context_word_limit,
+        needle_seeds_per_position=args.needle_seeds_per_position,
+        headline_only=args.headline_only,
+        include_diagnostic_longbench=args.include_diagnostic_longbench,
     )
     print(result_dir)
 

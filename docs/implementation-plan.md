@@ -388,11 +388,3 @@ Isso não é problema; é, na verdade, uma parte importante do que eu quero desc
 9. só depois adicionar residual inspirado em QJL.
 
 ---
-
-## Decisão metodológica final
-
-A ordem correta deste projeto é:
-
-**primeiro comparar**, depois **comprimir melhor**, e só então **otimizar**.
-
-Se eu inverter essa ordem, corro o risco de construir uma implementação sofisticada sem saber exatamente o que ela melhorou.

@@ -7,6 +7,7 @@ from typing import Dict, Literal, Optional, Sequence, Tuple
 
 
 Mode = Literal["core", "preset"]
+EvaluationMode = Literal["standard", "core", "preset"]
 
 
 @dataclass(frozen=True)
@@ -131,3 +132,13 @@ class TurboQuantConfig:
             ),
         )
 
+
+@dataclass(frozen=True)
+class EvaluationConfig:
+    model: str
+    mode: EvaluationMode = "standard"
+    suite: str = "quality"
+    context_tier: int = 512
+    decoding_mode: Literal["greedy"] = "greedy"
+    seed: int = 0
+    calibration_artifact_path: Optional[str] = None

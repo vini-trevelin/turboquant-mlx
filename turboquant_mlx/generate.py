@@ -44,11 +44,18 @@ def generate_tokens(
 @dataclass
 class RunMetrics:
     prompt_tokens: int
+    context_tokens: int
     generated_tokens: int
+    prefill_seconds: float
+    decode_seconds: float
     prompt_tps: float
     generation_tps: float
-    peak_memory_gb: float
     cache_nbytes: int
+    active_memory_before_bytes: int
+    active_memory_after_bytes: int
+    peak_memory_delta_bytes: int
+    metal_cache_memory_before_bytes: int
+    metal_cache_memory_after_bytes: int
 
 
 def _estimate_cache_nbytes(cache: List[Any]) -> int:
@@ -66,6 +73,42 @@ def _estimate_cache_nbytes(cache: List[Any]) -> int:
 
 def _ensure_tokenizer(tokenizer) -> TokenizerWrapper:
     return tokenizer if isinstance(tokenizer, TokenizerWrapper) else TokenizerWrapper(tokenizer)
+
+
+def _memory_api():
+    required = ("get_active_memory", "get_cache_memory", "get_peak_memory", "reset_peak_memory")
+    if all(hasattr(mx, name) for name in required):
+        return mx
+    return getattr(mx, "metal", mx)
+
+
+def _reset_peak_memory() -> None:
+    api = _memory_api()
+    if hasattr(api, "reset_peak_memory"):
+        api.reset_peak_memory()
+
+
+def _get_active_memory() -> int:
+    api = _memory_api()
+    if hasattr(api, "get_active_memory"):
+        return int(api.get_active_memory())
+    return 0
+
+
+def _get_cache_memory() -> int:
+    api = _memory_api()
+    if hasattr(api, "get_cache_memory"):
+        return int(api.get_cache_memory())
+    return 0
+
+
+def _get_peak_memory() -> int:
+    api = _memory_api()
+    if hasattr(api, "get_peak_memory"):
+        return int(api.get_peak_memory())
+    if hasattr(mx, "get_peak_memory"):
+        return int(mx.get_peak_memory())
+    return 0
 
 
 def run_generation(
@@ -90,6 +133,9 @@ def run_generation(
     prompt_cache = prompt_cache or make_prompt_cache(model)
 
     generated = []
+    _reset_peak_memory()
+    active_memory_before = _get_active_memory()
+    cache_memory_before = _get_cache_memory()
     prompt_start = time.perf_counter()
     first_token_time = None
     for step_idx, (token, logprobs) in enumerate(
@@ -112,15 +158,25 @@ def run_generation(
         if len(generated) >= max_tokens:
             break
     detokenizer.finalize()
-    prompt_elapsed = max((first_token_time or time.perf_counter()) - prompt_start, 1e-9)
-    generation_elapsed = max(time.perf_counter() - (first_token_time or prompt_start), 1e-9)
+    prefill_seconds = max((first_token_time or time.perf_counter()) - prompt_start, 1e-9)
+    decode_seconds = max(time.perf_counter() - (first_token_time or prompt_start), 1e-9)
+    active_memory_after = _get_active_memory()
+    cache_memory_after = _get_cache_memory()
+    peak_memory_delta_bytes = _get_peak_memory()
     metrics = RunMetrics(
         prompt_tokens=len(prompt_tokens),
+        context_tokens=len(prompt_tokens),
         generated_tokens=len(generated),
-        prompt_tps=len(prompt_tokens) / prompt_elapsed,
-        generation_tps=len(generated) / generation_elapsed if generated else 0.0,
-        peak_memory_gb=mx.get_peak_memory() / 1e9,
+        prefill_seconds=prefill_seconds,
+        decode_seconds=decode_seconds,
+        prompt_tps=len(prompt_tokens) / prefill_seconds,
+        generation_tps=len(generated) / decode_seconds if generated else 0.0,
         cache_nbytes=_estimate_cache_nbytes(prompt_cache),
+        active_memory_before_bytes=active_memory_before,
+        active_memory_after_bytes=active_memory_after,
+        peak_memory_delta_bytes=peak_memory_delta_bytes,
+        metal_cache_memory_before_bytes=cache_memory_before,
+        metal_cache_memory_after_bytes=cache_memory_after,
     )
     return detokenizer.text, metrics, prompt_cache
 
@@ -133,4 +189,11 @@ def append_jsonl(path: str | Path, payload: dict) -> None:
 
 
 def metrics_to_dict(metrics: RunMetrics) -> dict:
-    return asdict(metrics)
+    payload = asdict(metrics)
+    payload["peak_memory_delta_gb"] = metrics.peak_memory_delta_bytes / 1e9
+    payload["peak_memory_gb"] = payload["peak_memory_delta_gb"]
+    payload["active_memory_before_gb"] = metrics.active_memory_before_bytes / 1e9
+    payload["active_memory_after_gb"] = metrics.active_memory_after_bytes / 1e9
+    payload["metal_cache_memory_before_gb"] = metrics.metal_cache_memory_before_bytes / 1e9
+    payload["metal_cache_memory_after_gb"] = metrics.metal_cache_memory_after_bytes / 1e9
+    return payload
