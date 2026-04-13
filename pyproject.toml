@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "turboquant-mlx"
+version = "0.1.0"
+description = "Local MLX TurboQuant adapter for Llama KV-cache experiments"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "mlx>=0.22.0",
+  "mlx-lm>=0.21.0",
+  "numpy",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+turboquant-calibrate = "turboquant_mlx.calibration:main"
+turboquant-needle = "turboquant_mlx.needle:main"
+turboquant-longbench = "turboquant_mlx.longbench:main"
+turboquant-report = "turboquant_mlx.reporting:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
