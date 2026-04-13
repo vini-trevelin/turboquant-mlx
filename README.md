@@ -75,7 +75,7 @@ If you prefer module execution, the same entrypoints are available through `pyth
 
 External context:
 
-- [TurboQuant blog post](https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/)
+- [Google Research blog: TurboQuant - Redefining AI efficiency with extreme compression](https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/)
 - [TurboQuant paper](https://openreview.net/forum?id=tO3ASKZlok)
 
 ## Project Notes
