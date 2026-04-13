@@ -35,6 +35,7 @@ def test_quantize_dequantize_preserves_shape():
 def test_cache_streaming_append_and_trim():
     config = TurboQuantConfig(mode="core", head_dim=8, core_bits=3, qjl_enabled=True, qjl_dim=16)
     cache = TurboQuantKVCache(config)
+    cache.step = 2
     rng = np.random.default_rng(1)
     first_keys = mx.array(rng.normal(size=(1, 2, 2, 8)).astype(np.float32))
     first_values = mx.array(rng.normal(size=(1, 2, 2, 8)).astype(np.float32))
@@ -46,11 +47,14 @@ def test_cache_streaming_append_and_trim():
     cache.update_and_fetch(second_keys, second_values)
     assert cache.offset == 3
     assert cache.keys.sequence_length == 3
+    assert cache.keys.chunk_count == 2
     assert cache.observed_nbytes() > 0
+    assert cache.perf_stats["cache_update_seconds"] > 0
 
     cache.trim(1)
     assert cache.offset == 2
     assert cache.keys.sequence_length == 2
+    assert cache.keys.chunk_count == 1
 
 
 def test_compressed_attention_matches_dense_reference():
@@ -82,6 +86,36 @@ def test_compressed_attention_matches_dense_reference():
     assert np.allclose(np.asarray(compressed_out), np.asarray(dense_out), atol=1e-4)
 
 
+def test_chunked_compressed_attention_matches_dense_reference():
+    config = TurboQuantConfig(mode="core", head_dim=8, core_bits=3, qjl_enabled=True, qjl_dim=32)
+    cache = TurboQuantKVCache(config)
+    cache.step = 2
+    setup = cache.setup
+    rng = np.random.default_rng(5)
+    queries = mx.array(rng.normal(size=(1, 2, 3, 8)).astype(np.float32))
+    keys = mx.array(rng.normal(size=(1, 2, 5, 8)).astype(np.float32))
+    values = mx.array(rng.normal(size=(1, 2, 5, 8)).astype(np.float32))
+
+    compressed_keys, compressed_values = cache.update_and_fetch(keys, values)
+    dense_keys = dequantize_tensor(compressed_keys, setup)
+    dense_values = dequantize_tensor(compressed_values, setup)
+
+    scores = score_queries_against_keys(
+        queries,
+        compressed_keys,
+        setup,
+        scale=0.5,
+        apply_qjl=False,
+    )
+    dense_scores = mx.matmul(queries, dense_keys.transpose(0, 1, 3, 2)) * 0.5
+    assert scores.shape == dense_scores.shape
+
+    weights = mx.softmax(scores, axis=-1, precise=True)
+    compressed_out = apply_attention_to_values(weights, compressed_values, setup)
+    dense_out = mx.matmul(mx.softmax(dense_scores, axis=-1, precise=True), dense_values)
+    assert np.allclose(np.asarray(compressed_out), np.asarray(dense_out), atol=1e-4)
+
+
 def test_qjl_correction_changes_key_scores():
     config = TurboQuantConfig(mode="core", head_dim=8, core_bits=2, qjl_enabled=True, qjl_dim=512)
     setup = SharedTurboQuantSetup.from_config(config)
@@ -92,4 +126,3 @@ def test_qjl_correction_changes_key_scores():
     mse_score = score_queries_against_keys(query, compressed, setup, scale=1.0, apply_qjl=False)
     qjl_score = score_queries_against_keys(query, compressed, setup, scale=1.0, apply_qjl=True)
     assert not np.allclose(np.asarray(mse_score), np.asarray(qjl_score))
-

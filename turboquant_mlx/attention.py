@@ -21,6 +21,7 @@ def turboquant_scaled_dot_product_attention(
         cache.setup,
         scale=scale,
         apply_qjl=cache.config.qjl_enabled,
+        perf_stats=cache.perf_stats,
     )
 
     if mask is not None:
@@ -35,5 +36,4 @@ def turboquant_scaled_dot_product_attention(
             scores = scores + mask
 
     weights = mx.softmax(scores, axis=-1, precise=True)
-    return apply_attention_to_values(weights, cache.values, cache.setup)
-
+    return apply_attention_to_values(weights, cache.values, cache.setup, perf_stats=cache.perf_stats)

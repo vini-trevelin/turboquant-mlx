@@ -1,7 +1,9 @@
 import numpy as np
+import mlx.core as mx
 
 from turboquant_mlx.codebooks import beta_lloyd_max_codebook
 from turboquant_mlx.packing import pack_codes, pack_signs, unpack_codes, unpack_signs
+from turboquant_mlx.quantizer import decode_packed_codes_mx, decode_packed_signs_mx
 from turboquant_mlx.rotation import orthogonal_matrix
 
 
@@ -32,3 +34,25 @@ def test_pack_unpack_signs_roundtrip():
     unpacked = unpack_signs(packed, num_codes=signs.shape[-1])
     assert np.array_equal(signs, unpacked)
 
+
+def test_mlx_decode_matches_numpy_unpack_for_used_bit_widths():
+    rng = np.random.default_rng(0)
+    for bits in (1, 2, 3, 4, 5):
+        codes = rng.integers(0, 1 << bits, size=(2, 3, 7), dtype=np.uint8)
+        packed = pack_codes(codes, bits=bits)
+        decoded = decode_packed_codes_mx(
+            mx.array(packed, dtype=mx.uint8),
+            bits=bits,
+            num_codes=codes.shape[-1],
+        )
+        expected = unpack_codes(packed, bits=bits, num_codes=codes.shape[-1])
+        assert np.array_equal(np.asarray(decoded), expected.astype(np.int32))
+
+
+def test_mlx_sign_decode_matches_numpy_unpack():
+    rng = np.random.default_rng(1)
+    signs = rng.integers(0, 2, size=(2, 4, 9), dtype=np.uint8)
+    packed = pack_signs(signs)
+    decoded = decode_packed_signs_mx(mx.array(packed, dtype=mx.uint8), num_codes=signs.shape[-1])
+    expected = unpack_signs(packed, num_codes=signs.shape[-1])
+    assert np.array_equal(np.asarray(decoded), expected)
