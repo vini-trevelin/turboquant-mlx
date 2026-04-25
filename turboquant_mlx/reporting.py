@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
+import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -233,6 +235,42 @@ def _summarize_parity_rows(rows: List[dict]) -> List[dict]:
 
 def _index_summary(summary: List[dict]) -> dict[tuple[str, int], dict]:
     return {(row["mode_slug"], row["context_tier"]): row for row in summary}
+
+
+def _git_sha() -> str:
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+        return out.stdout.strip() or "unknown"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return "unknown"
+
+
+def _package_version(name: str) -> str:
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+    except ImportError:  # pragma: no cover - python < 3.8
+        return "unknown"
+    try:
+        return version(name)
+    except PackageNotFoundError:
+        return "unknown"
+
+
+def _provenance(args: Optional[argparse.Namespace] = None) -> dict:
+    return {
+        "git_sha": _git_sha(),
+        "python_version": sys.version.split()[0],
+        "mlx_version": _package_version("mlx"),
+        "mlx_lm_version": _package_version("mlx-lm"),
+        "numpy_version": _package_version("numpy"),
+        "args": vars(args) if args is not None else {},
+    }
 
 
 def _swap_latest_symlink(latest: Path, *, target_name: str) -> None:
@@ -585,6 +623,7 @@ def run_report(
     needle_seeds_per_position: int = 4,
     headline_only: bool = False,
     quiet: bool = False,
+    provenance: Optional[dict] = None,
 ) -> Path:
     context_tiers = context_tiers or list(DEFAULT_CONTEXT_TIERS)
     quality_datasets = quality_datasets or list(DEFAULT_QUALITY_DATASETS)
@@ -730,6 +769,7 @@ def run_report(
     summary_payload = {
         "model": model,
         "timestamp": timestamp,
+        "provenance": provenance if provenance is not None else _provenance(),
         "context_tiers": context_tiers,
         "quality_datasets": quality_datasets,
         "calibration_datasets": calibration_datasets,
@@ -804,6 +844,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_arg_parser().parse_args()
+    provenance = _provenance(args=args)
     result_dir = run_report(
         model=args.model,
         longbench_source_dir=Path(args.longbench_source_dir),
@@ -819,6 +860,7 @@ def main() -> None:
         needle_seeds_per_position=args.needle_seeds_per_position,
         headline_only=args.headline_only,
         quiet=args.quiet,
+        provenance=provenance,
     )
     print(result_dir)
 
