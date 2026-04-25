@@ -126,3 +126,31 @@ def test_qjl_correction_changes_key_scores():
     mse_score = score_queries_against_keys(query, compressed, setup, scale=1.0, apply_qjl=False)
     qjl_score = score_queries_against_keys(query, compressed, setup, scale=1.0, apply_qjl=True)
     assert not np.allclose(np.asarray(mse_score), np.asarray(qjl_score))
+
+
+def test_gqa_compressed_attention_matches_dense_reference():
+    config = TurboQuantConfig(mode="core", head_dim=8, core_bits=3)
+    setup = SharedTurboQuantSetup.from_config(config)
+    rng = np.random.default_rng(11)
+    n_kv, repeats, q_len, kv_len = 2, 4, 3, 6
+    queries = mx.array(rng.normal(size=(1, n_kv * repeats, q_len, 8)).astype(np.float32))
+    keys = mx.array(rng.normal(size=(1, n_kv, kv_len, 8)).astype(np.float32))
+    values = mx.array(rng.normal(size=(1, n_kv, kv_len, 8)).astype(np.float32))
+    compressed_keys = quantize_tensor(keys, setup)
+    compressed_values = quantize_tensor(values, setup)
+
+    scores = score_queries_against_keys(queries, compressed_keys, setup, scale=0.5, apply_qjl=False)
+    assert scores.shape == (1, n_kv * repeats, q_len, kv_len)
+
+    dense_keys = mx.repeat(dequantize_tensor(compressed_keys, setup), repeats, axis=1)
+    dense_values = mx.repeat(dequantize_tensor(compressed_values, setup), repeats, axis=1)
+    dense_scores = mx.matmul(queries, dense_keys.transpose(0, 1, 3, 2)) * 0.5
+    assert np.allclose(np.asarray(scores), np.asarray(dense_scores), atol=1e-4)
+
+    weights = mx.softmax(scores, axis=-1, precise=True)
+    compressed_out = apply_attention_to_values(weights, compressed_values, setup)
+    dense_out = mx.matmul(mx.softmax(dense_scores, axis=-1, precise=True), dense_values)
+    assert compressed_out.shape == (1, n_kv * repeats, q_len, 8)
+    assert np.allclose(np.asarray(compressed_out), np.asarray(dense_out), atol=1e-4)
+
+
