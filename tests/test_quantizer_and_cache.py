@@ -116,6 +116,26 @@ def test_chunked_compressed_attention_matches_dense_reference():
     assert np.allclose(np.asarray(compressed_out), np.asarray(dense_out), atol=1e-4)
 
 
+def test_teacher_forced_self_parity_zero_kl_and_matched_nll():
+    # Standard model compared to itself must produce KL=0, top1=1.0, and
+    # identical NLLs for both columns. This guards _compare_logits from being
+    # accidentally rewired so the targets never reach the NLL accumulator.
+    import mlx.core as mx
+    import numpy as np
+
+    from turboquant_mlx.teacher_forcing import _compare_logits
+
+    rng = np.random.default_rng(0)
+    logits = rng.normal(size=(8, 11)).astype(np.float32)
+    targets = rng.integers(0, 11, size=(8,))
+    top1, top5, kl, std_nll, turbo_nll = _compare_logits(logits, logits, targets)
+    assert top1 == 8.0
+    assert abs(top5 - 8.0) < 1e-6
+    assert abs(kl) < 1e-5
+    assert abs(std_nll - turbo_nll) < 1e-6
+    assert std_nll > 0.0
+
+
 def test_qjl_oracle_reduces_score_error():
     config = TurboQuantConfig(mode="core", head_dim=16, core_bits=2, qjl_enabled=True, qjl_dim=4096)
     setup = SharedTurboQuantSetup.from_config(config)

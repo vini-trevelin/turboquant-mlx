@@ -20,6 +20,10 @@ class TeacherForcedMetrics:
     top1_agreement: float
     top5_overlap: float
     kl_divergence_mean: float
+    standard_nll_mean: float
+    turbo_nll_mean: float
+    standard_perplexity: float
+    turbo_perplexity: float
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -38,7 +42,11 @@ def _log_softmax(logits: np.ndarray) -> np.ndarray:
     return shifted - logsumexp
 
 
-def _compare_logits(standard_logits: np.ndarray, turbo_logits: np.ndarray) -> tuple[float, float, float]:
+def _compare_logits(
+    standard_logits: np.ndarray,
+    turbo_logits: np.ndarray,
+    targets: np.ndarray,
+) -> tuple[float, float, float, float, float]:
     steps = standard_logits.shape[0]
     top1_matches = 0.0
     top5_overlap = 0.0
@@ -47,6 +55,9 @@ def _compare_logits(standard_logits: np.ndarray, turbo_logits: np.ndarray) -> tu
     standard_log_probs = _log_softmax(standard_logits)
     turbo_log_probs = _log_softmax(turbo_logits)
     standard_probs = np.exp(standard_log_probs)
+
+    standard_nll = -float(np.sum(standard_log_probs[np.arange(steps), targets]))
+    turbo_nll = -float(np.sum(turbo_log_probs[np.arange(steps), targets]))
 
     for idx in range(steps):
         std_row = standard_logits[idx]
@@ -65,7 +76,7 @@ def _compare_logits(standard_logits: np.ndarray, turbo_logits: np.ndarray) -> tu
             )
         )
 
-    return top1_matches, top5_overlap, kl_total
+    return top1_matches, top5_overlap, kl_total, standard_nll, turbo_nll
 
 
 def evaluate_teacher_forced_loaded(
@@ -83,34 +94,52 @@ def evaluate_teacher_forced_loaded(
             top1_agreement=0.0,
             top5_overlap=0.0,
             kl_divergence_mean=0.0,
+            standard_nll_mean=0.0,
+            turbo_nll_mean=0.0,
+            standard_perplexity=0.0,
+            turbo_perplexity=0.0,
         )
 
     standard_cache = standard_model.make_cache()
     turbo_cache = turbo_model.make_cache()
     teacher_inputs = prompt_tokens[:-1]
+    teacher_targets = prompt_tokens[1:]
 
     top1_matches = 0.0
     top5_overlap = 0.0
     kl_total = 0.0
+    standard_nll_total = 0.0
+    turbo_nll_total = 0.0
     steps = 0
 
     for start in range(0, len(teacher_inputs), chunk_size):
         chunk = teacher_inputs[start : start + chunk_size]
+        targets = np.asarray(teacher_targets[start : start + chunk_size], dtype=np.int64)
         inputs = mx.array([chunk], dtype=mx.uint32)
         standard_logits = np.asarray(standard_model(inputs, cache=standard_cache)[0])
         turbo_logits = np.asarray(turbo_model(inputs, cache=turbo_cache)[0])
-        chunk_top1, chunk_top5, chunk_kl = _compare_logits(standard_logits, turbo_logits)
+        chunk_top1, chunk_top5, chunk_kl, chunk_std_nll, chunk_turbo_nll = _compare_logits(
+            standard_logits, turbo_logits, targets
+        )
         top1_matches += chunk_top1
         top5_overlap += chunk_top5
         kl_total += chunk_kl
+        standard_nll_total += chunk_std_nll
+        turbo_nll_total += chunk_turbo_nll
         steps += len(chunk)
 
+    standard_nll_mean = standard_nll_total / steps if steps else 0.0
+    turbo_nll_mean = turbo_nll_total / steps if steps else 0.0
     return TeacherForcedMetrics(
         context_tokens=len(prompt_tokens),
         steps=steps,
         top1_agreement=top1_matches / steps if steps else 0.0,
         top5_overlap=top5_overlap / steps if steps else 0.0,
         kl_divergence_mean=kl_total / steps if steps else 0.0,
+        standard_nll_mean=standard_nll_mean,
+        turbo_nll_mean=turbo_nll_mean,
+        standard_perplexity=float(np.exp(standard_nll_mean)) if steps else 0.0,
+        turbo_perplexity=float(np.exp(turbo_nll_mean)) if steps else 0.0,
     )
 
 
