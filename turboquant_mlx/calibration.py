@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 import mlx.core as mx
 import numpy as np
@@ -44,6 +45,74 @@ def load_texts(path: str | Path) -> List[str]:
             else:
                 lines.append(" ".join(str(v) for v in payload.values()))
     return lines
+
+
+def _calibration_cache_key(
+    *,
+    model_path: str,
+    outlier_count: int,
+    quantile: float,
+    texts: List[str],
+    max_examples: int,
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(model_path.encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(f"{outlier_count}".encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(f"{quantile:.6f}".encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(f"{max_examples}".encode("utf-8"))
+    digest.update(b"\x00")
+    for text in texts[:max_examples]:
+        digest.update(hashlib.sha256(text.encode("utf-8")).digest())
+    return digest.hexdigest()
+
+
+def calibrate_outlier_mask_cached(
+    model_path: str,
+    texts: Iterable[str],
+    *,
+    outlier_count: int = 32,
+    quantile: float = 99.9,
+    max_examples: int = 32,
+    cache_dir: Optional[Path] = None,
+) -> CalibrationArtifact:
+    """Calibrate or reuse a previous artifact when the inputs match exactly.
+
+    The cache key covers (model_path, outlier_count, quantile, max_examples,
+    sha256 of each calibration text). Any change invalidates the cache.
+    """
+    texts = list(texts)
+    if cache_dir is not None:
+        key = _calibration_cache_key(
+            model_path=model_path,
+            outlier_count=outlier_count,
+            quantile=quantile,
+            texts=texts,
+            max_examples=max_examples,
+        )
+        cache_dir = Path(cache_dir)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cached_artifact = cache_dir / f"{key}.json"
+        if cached_artifact.exists():
+            return CalibrationArtifact.load(cached_artifact)
+        artifact = calibrate_outlier_mask(
+            model_path,
+            texts,
+            outlier_count=outlier_count,
+            quantile=quantile,
+            max_examples=max_examples,
+        )
+        artifact.save(cached_artifact)
+        return artifact
+    return calibrate_outlier_mask(
+        model_path,
+        texts,
+        outlier_count=outlier_count,
+        quantile=quantile,
+        max_examples=max_examples,
+    )
 
 
 def calibrate_outlier_mask(

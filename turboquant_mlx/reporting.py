@@ -17,7 +17,7 @@ from ._charts import format_bytes as _format_bytes
 from ._charts import line_chart_svg as _line_chart_svg
 from ._charts import scatter_chart_svg as _scatter_chart_svg
 from ._seed import set_global_seed
-from .calibration import calibrate_outlier_mask
+from .calibration import calibrate_outlier_mask_cached
 from .config import CalibrationArtifact, CalibrationConfig, EvaluationConfig, TurboQuantConfig
 from .longbench import evaluate_longbench_loaded, prepare_longbench_examples
 from .load import load_turboquant
@@ -676,12 +676,14 @@ def run_report(
         examples_per_dataset=calibration_examples_per_dataset,
         prompt_token_limit=max(context_tiers),
     )
-    artifact = calibrate_outlier_mask(
+    calibration_cache_dir = output_root / ".calibration_cache" / model.replace("/", "_")
+    artifact = calibrate_outlier_mask_cached(
         model,
         calibration_texts,
         outlier_count=32,
         quantile=99.9,
         max_examples=len(calibration_texts),
+        cache_dir=calibration_cache_dir,
     )
     calibration_artifact_path = raw_dir / "calibration_artifact.json"
     artifact.save(calibration_artifact_path)
