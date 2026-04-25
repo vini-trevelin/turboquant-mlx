@@ -64,6 +64,11 @@ turboquant-report
 pytest -q
 ```
 
+`turboquant-report` writes to `./results/` and reads LongBench inputs from
+`./assets/longbench/data/` by default. Override with the CLI flags
+`--output-root` / `--longbench-source-dir`, or with the environment variables
+`TURBOQUANT_OUTPUT_ROOT` / `TURBOQUANT_LONGBENCH_DIR`.
+
 If you prefer module execution, the same entrypoints are available through `python -m turboquant_mlx.<module>`.
 
 ## Read This First

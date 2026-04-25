@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -785,14 +786,19 @@ def run_report(
     return result_dir
 
 
+def _default_longbench_dir() -> str:
+    return os.environ.get("TURBOQUANT_LONGBENCH_DIR", "assets/longbench/data")
+
+
+def _default_output_root() -> str:
+    return os.environ.get("TURBOQUANT_OUTPUT_ROOT", "results")
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the TurboQuant validation report.")
     parser.add_argument("--model", default="mlx-community/Llama-3.2-3B-Instruct-4bit")
-    parser.add_argument(
-        "--longbench-source-dir",
-        default="/Users/vinitl/prog/turboquant-mlx/assets/longbench/data",
-    )
-    parser.add_argument("--output-root", default="/Users/vinitl/prog/turboquant-mlx/results")
+    parser.add_argument("--longbench-source-dir", default=_default_longbench_dir())
+    parser.add_argument("--output-root", default=_default_output_root())
     parser.add_argument("--context-tiers", default="512,2048,4096")
     parser.add_argument("--quality-datasets", default="triviaqa_e,hotpotqa_e,2wikimqa_e")
     parser.add_argument("--calibration-datasets", default="multifieldqa_en,multi_news")
