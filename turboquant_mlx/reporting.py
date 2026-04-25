@@ -230,6 +230,8 @@ def _summarize_parity_rows(rows: List[dict]) -> List[dict]:
         grouped.setdefault(row["context_tier"], []).append(row)
     summary = []
     for context_tier, group in sorted(grouped.items()):
+        std_ppl = _mean(row["standard_perplexity"] for row in group if row.get("standard_perplexity"))
+        turbo_ppl = _mean(row["turbo_perplexity"] for row in group if row.get("turbo_perplexity"))
         summary.append(
             {
                 "context_tier": context_tier,
@@ -237,6 +239,9 @@ def _summarize_parity_rows(rows: List[dict]) -> List[dict]:
                 "top1_agreement_mean": _mean(row["top1_agreement"] for row in group),
                 "top5_overlap_mean": _mean(row["top5_overlap"] for row in group),
                 "kl_divergence_mean": _mean(row["kl_divergence_mean"] for row in group),
+                "standard_perplexity_mean": std_ppl,
+                "turbo_perplexity_mean": turbo_ppl,
+                "perplexity_ratio_mean": (turbo_ppl / std_ppl) if std_ppl else 0.0,
             }
         )
     return summary
@@ -591,6 +596,21 @@ def _generate_plots(
                 color="#0F766E",
             )
         )
+        ratios = [row.get("perplexity_ratio_mean", 0.0) for row in parity_summary]
+        if any(ratios):
+            (plots_dir / "parity_perplexity_ratio_vs_context.svg").write_text(
+                _bar_chart_svg(
+                    "Teacher-Forced Perplexity Ratio vs Context Length",
+                    tier_labels,
+                    ratios,
+                    subtitle="TurboQuant perplexity / Standard perplexity on the prompt suffix (1.0 = identical)",
+                    x_label="Context length (tokens)",
+                    y_label="Perplexity ratio (turbo / standard)",
+                    color="#7C3AED",
+                    reference_line=1.0,
+                    reference_label="standard = 1.0",
+                )
+            )
 
 
 def _write_annotations(
@@ -658,6 +678,15 @@ def _write_annotations(
         summary_lines.append(
             f"- Worst teacher-forced KL in the headline comparison: `{worst_parity['kl_divergence_mean']:.4f}` at `{worst_parity['context_tier']}` tokens."
         )
+        ratios = [row.get("perplexity_ratio_mean", 0.0) for row in parity_summary if row.get("perplexity_ratio_mean")]
+        if ratios:
+            worst_ppl = max(parity_summary, key=lambda row: row.get("perplexity_ratio_mean", 0.0))
+            summary_lines.append(
+                f"- Worst teacher-forced perplexity ratio (turbo / standard): "
+                f"`{worst_ppl['perplexity_ratio_mean']:.3f}` at `{worst_ppl['context_tier']}` tokens "
+                f"(standard PPL `{worst_ppl['standard_perplexity_mean']:.2f}`, "
+                f"turbo PPL `{worst_ppl['turbo_perplexity_mean']:.2f}`)."
+            )
     (annotations_dir / "SUMMARY.md").write_text("\n".join(summary_lines))
 
     limitations_lines = [

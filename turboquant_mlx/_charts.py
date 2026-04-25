@@ -123,6 +123,8 @@ def bar_chart_svg(
     height: int = 540,
     color: str = "#2463EB",
     formatter: Callable[[float], str] = _format_float,
+    reference_line: Optional[float] = None,
+    reference_label: str = "",
 ) -> str:
     if not values:
         raise ValueError("bar chart requires at least one value")
@@ -132,7 +134,8 @@ def bar_chart_svg(
     origin_y = top + chart_height
     gap = 24
     bar_width = max(24, (chart_width - gap * (len(values) - 1)) / len(values))
-    lo, hi = _domain(list(values), zero_baseline=True)
+    domain_values = list(values) + ([reference_line] if reference_line is not None else [])
+    lo, hi = _domain(domain_values, zero_baseline=True)
 
     parts = _frame(title, subtitle, width=width, height=height, left=left, right=right, top=top, bottom=bottom, x_label=x_label, y_label=y_label)
 
@@ -144,6 +147,18 @@ def bar_chart_svg(
             f'font-family="{CHART_FONT}" fill="{TICK_COLOR}">{formatter(tick)}</text>'
         )
     parts.append(f'<line x1="{left}" y1="{origin_y}" x2="{width - right}" y2="{origin_y}" stroke="{AXIS_COLOR}" stroke-width="1.5"/>')
+
+    if reference_line is not None:
+        ref_y = origin_y - chart_height * (reference_line - lo) / (hi - lo)
+        parts.append(
+            f'<line x1="{left}" y1="{ref_y:.1f}" x2="{width - right}" y2="{ref_y:.1f}" '
+            f'stroke="#94A3B8" stroke-width="1.2" stroke-dasharray="6,4"/>'
+        )
+        if reference_label:
+            parts.append(
+                f'<text x="{width - right - 6:.1f}" y="{ref_y - 6:.1f}" text-anchor="end" '
+                f'font-size="11" font-family="{CHART_FONT}" fill="#475569">{reference_label}</text>'
+            )
 
     for idx, (label, value) in enumerate(zip(labels, values)):
         x = left + idx * (bar_width + gap)
