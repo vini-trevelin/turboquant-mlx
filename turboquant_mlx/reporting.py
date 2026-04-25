@@ -25,7 +25,6 @@ from .teacher_forcing import evaluate_teacher_forced_loaded
 
 DEFAULT_QUALITY_DATASETS = ["triviaqa_e", "hotpotqa_e", "2wikimqa_e"]
 DEFAULT_CALIBRATION_DATASETS = ["multifieldqa_en", "multi_news"]
-DEFAULT_DIAGNOSTIC_DATASETS = ["lcc_e", "trec_e"]
 DEFAULT_CONTEXT_TIERS = [512, 2048, 4096]
 
 
@@ -168,29 +167,6 @@ def _prepare_calibration_texts(
             rows.append({"dataset": dataset_name, "text": text})
     write_jsonl(output_dir / "datasets" / "calibration_prompts.jsonl", rows)
     return texts
-
-
-def _build_diagnostic_slice(
-    source_dir: Path,
-    tokenizer,
-    output_dir: Path,
-    *,
-    dataset_names: List[str],
-    prompt_token_limit: int,
-) -> Path:
-    rows = []
-    for dataset_name in dataset_names:
-        prepared = prepare_longbench_examples(
-            source_dir / f"{dataset_name}.jsonl",
-            tokenizer,
-            prompt_token_limit=prompt_token_limit,
-            max_examples=1,
-            dataset_name=dataset_name,
-        )
-        rows.extend(_serializable_prepared_example(example) for example in prepared)
-    path = output_dir / "datasets" / "diagnostic_longbench.jsonl"
-    write_jsonl(path, rows)
-    return path
 
 
 def _summarize_quality_rows(rows: List[dict]) -> List[dict]:
@@ -593,7 +569,6 @@ def run_report(
     context_tiers: List[int] | None = None,
     quality_datasets: List[str] | None = None,
     calibration_datasets: List[str] | None = None,
-    diagnostic_datasets: List[str] | None = None,
     quality_examples_per_dataset: int = 10,
     parity_examples_per_dataset: int = 1,
     calibration_examples_per_dataset: int = 2,
@@ -601,12 +576,10 @@ def run_report(
     needle_max_tokens: int = 12,
     needle_seeds_per_position: int = 4,
     headline_only: bool = False,
-    include_diagnostic_longbench: bool = False,
 ) -> Path:
     context_tiers = context_tiers or list(DEFAULT_CONTEXT_TIERS)
     quality_datasets = quality_datasets or list(DEFAULT_QUALITY_DATASETS)
     calibration_datasets = calibration_datasets or list(DEFAULT_CALIBRATION_DATASETS)
-    diagnostic_datasets = diagnostic_datasets or list(DEFAULT_DIAGNOSTIC_DATASETS)
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     result_dir = output_root / timestamp
@@ -634,15 +607,6 @@ def run_report(
         examples_per_dataset=calibration_examples_per_dataset,
         prompt_token_limit=max(context_tiers),
     )
-    if include_diagnostic_longbench:
-        _build_diagnostic_slice(
-            longbench_source_dir,
-            tokenizer,
-            result_dir,
-            dataset_names=diagnostic_datasets,
-            prompt_token_limit=min(context_tiers),
-        )
-
     artifact = calibrate_outlier_mask(
         model,
         calibration_texts,
@@ -802,7 +766,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--context-tiers", default="512,2048,4096")
     parser.add_argument("--quality-datasets", default="triviaqa_e,hotpotqa_e,2wikimqa_e")
     parser.add_argument("--calibration-datasets", default="multifieldqa_en,multi_news")
-    parser.add_argument("--diagnostic-datasets", default="lcc_e,trec_e")
     parser.add_argument("--quality-examples-per-dataset", type=int, default=10)
     parser.add_argument("--parity-examples-per-dataset", type=int, default=1)
     parser.add_argument("--calibration-examples-per-dataset", type=int, default=2)
@@ -810,7 +773,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--needle-max-tokens", type=int, default=12)
     parser.add_argument("--needle-seeds-per-position", type=int, default=4)
     parser.add_argument("--headline-only", action="store_true")
-    parser.add_argument("--include-diagnostic-longbench", action="store_true")
     return parser
 
 
@@ -823,7 +785,6 @@ def main() -> None:
         context_tiers=_parse_int_list(args.context_tiers),
         quality_datasets=_parse_csv_list(args.quality_datasets),
         calibration_datasets=_parse_csv_list(args.calibration_datasets),
-        diagnostic_datasets=_parse_csv_list(args.diagnostic_datasets),
         quality_examples_per_dataset=args.quality_examples_per_dataset,
         parity_examples_per_dataset=args.parity_examples_per_dataset,
         calibration_examples_per_dataset=args.calibration_examples_per_dataset,
@@ -831,7 +792,6 @@ def main() -> None:
         needle_max_tokens=args.needle_max_tokens,
         needle_seeds_per_position=args.needle_seeds_per_position,
         headline_only=args.headline_only,
-        include_diagnostic_longbench=args.include_diagnostic_longbench,
     )
     print(result_dir)
 
