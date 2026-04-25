@@ -419,9 +419,6 @@ def _generate_plots(
 
     quality_series = {}
     cache_series = {}
-    peak_series = {}
-    prompt_tps_series = {}
-    generation_tps_series = {}
     needle_series = {}
     for mode_slug in mode_order:
         mode_rows = [row for row in quality_summary if row["mode_slug"] == mode_slug]
@@ -432,29 +429,8 @@ def _generate_plots(
         cache_series[mode_label] = [
             _find_summary_row(quality_summary, mode_slug=mode_slug, context_tier=tier)["cache_nbytes_mean"] for tier in tiers
         ]
-        peak_series[mode_label] = [
-            _find_summary_row(quality_summary, mode_slug=mode_slug, context_tier=tier)["peak_memory_delta_bytes_mean"] for tier in tiers
-        ]
-        prompt_tps_series[mode_label] = [
-            _find_summary_row(quality_summary, mode_slug=mode_slug, context_tier=tier)["prompt_tps_mean"] for tier in tiers
-        ]
-        generation_tps_series[mode_label] = [
-            _find_summary_row(quality_summary, mode_slug=mode_slug, context_tier=tier)["generation_tps_mean"] for tier in tiers
-        ]
         needle_series[mode_label] = [
             _find_summary_row(needle_summary, mode_slug=mode_slug, context_tier=tier)["accuracy_mean"] for tier in tiers
-        ]
-
-    standard_quality = {row["context_tier"]: row["mean_f1"] for row in quality_summary if row["mode_slug"] == "standard"}
-    delta_series = {}
-    for mode_slug in mode_order:
-        if mode_slug == "standard":
-            continue
-        mode_rows = [row for row in quality_summary if row["mode_slug"] == mode_slug]
-        mode_label = mode_rows[0]["mode_label"]
-        delta_series[mode_label] = [
-            _find_summary_row(quality_summary, mode_slug=mode_slug, context_tier=tier)["mean_f1"] - standard_quality[tier]
-            for tier in tiers
         ]
 
     tradeoff_points = []
@@ -476,14 +452,6 @@ def _generate_plots(
             subtitle="Mean token-F1 on curated long-context QA tasks",
         )
     )
-    (plots_dir / "quality_delta_vs_standard.svg").write_text(
-        _line_chart_svg(
-            "Quality Delta vs Standard",
-            delta_series,
-            tier_labels,
-            subtitle="Mean F1 difference relative to Standard KV",
-        )
-    )
     (plots_dir / "cache_bytes_vs_context.svg").write_text(
         _line_chart_svg(
             "Observed Cache Bytes vs Context Length",
@@ -491,31 +459,6 @@ def _generate_plots(
             tier_labels,
             subtitle="Mean observed prompt cache bytes",
             formatter=lambda value: f"{int(value):,}",
-        )
-    )
-    (plots_dir / "peak_memory_delta_vs_context.svg").write_text(
-        _line_chart_svg(
-            "Peak Memory Delta vs Context Length",
-            peak_series,
-            tier_labels,
-            subtitle="Per-run peak memory delta in bytes",
-            formatter=lambda value: f"{int(value):,}",
-        )
-    )
-    (plots_dir / "prompt_tps_vs_context.svg").write_text(
-        _line_chart_svg(
-            "Prompt Tokens / Second vs Context Length",
-            prompt_tps_series,
-            tier_labels,
-            subtitle="Prefill throughput",
-        )
-    )
-    (plots_dir / "generation_tps_vs_context.svg").write_text(
-        _line_chart_svg(
-            "Generation Tokens / Second vs Context Length",
-            generation_tps_series,
-            tier_labels,
-            subtitle="Decode throughput",
         )
     )
     (plots_dir / "quality_memory_tradeoff.svg").write_text(
@@ -542,17 +485,6 @@ def _generate_plots(
                 [row["kl_divergence_mean"] for row in parity_summary],
                 subtitle="Standard KV vs Preset 3.5 + QJL",
                 color="#0F766E",
-            )
-        )
-
-    if acceptance["per_tier"]:
-        (plots_dir / "headline_cache_reduction.svg").write_text(
-            _bar_chart_svg(
-                "Headline Cache Reduction",
-                [str(row["context_tier"]) for row in acceptance["per_tier"]],
-                [row["cache_reduction"] for row in acceptance["per_tier"]],
-                subtitle="Standard KV bytes divided by Preset 3.5 + QJL bytes",
-                color="#059669",
             )
         )
 
