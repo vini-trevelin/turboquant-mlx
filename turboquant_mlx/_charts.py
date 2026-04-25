@@ -190,6 +190,7 @@ def line_chart_svg(
     formatter: Callable[[float], str] = _format_float,
     zero_baseline: bool = False,
     show_point_values: bool = True,
+    std_series: Optional[Mapping[str, List[float]]] = None,
 ) -> str:
     if not series:
         raise ValueError("line chart requires series")
@@ -198,7 +199,14 @@ def line_chart_svg(
     chart_height = height - top - bottom
     origin_y = top + chart_height
 
-    flat = [v for vals in series.values() for v in vals]
+    flat: List[float] = []
+    for name, values in series.items():
+        if not values:
+            continue
+        stds = (std_series or {}).get(name, [0.0] * len(values))
+        for v, s in zip(values, stds):
+            flat.append(v + s)
+            flat.append(v - s)
     lo, hi = _domain(flat, zero_baseline=zero_baseline)
     span = hi - lo or 1.0
 
@@ -226,10 +234,27 @@ def line_chart_svg(
         if not values:
             continue
         usable_xs = xs[: len(values)]
+        stds = (std_series or {}).get(name, [0.0] * len(values))
         pts = [(x, origin_y - chart_height * (v - lo) / span) for x, v in zip(usable_xs, values)]
         polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
         parts.append(f'<polyline fill="none" stroke="{color}" stroke-width="2.5" points="{polyline}"/>')
-        for (x, y), v in zip(pts, values):
+        for (x, y), v, s in zip(pts, values, stds):
+            if s and s > 0:
+                top_y = origin_y - chart_height * (v + s - lo) / span
+                bot_y = origin_y - chart_height * (v - s - lo) / span
+                parts.append(
+                    f'<line x1="{x:.1f}" y1="{top_y:.1f}" x2="{x:.1f}" y2="{bot_y:.1f}" '
+                    f'stroke="{color}" stroke-width="1.4" opacity="0.7"/>'
+                )
+                cap = 5
+                parts.append(
+                    f'<line x1="{x - cap:.1f}" y1="{top_y:.1f}" x2="{x + cap:.1f}" y2="{top_y:.1f}" '
+                    f'stroke="{color}" stroke-width="1.4" opacity="0.7"/>'
+                )
+                parts.append(
+                    f'<line x1="{x - cap:.1f}" y1="{bot_y:.1f}" x2="{x + cap:.1f}" y2="{bot_y:.1f}" '
+                    f'stroke="{color}" stroke-width="1.4" opacity="0.7"/>'
+                )
             parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4.5" fill="{color}"/>')
             if show_point_values:
                 parts.append(

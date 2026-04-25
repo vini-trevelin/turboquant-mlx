@@ -61,6 +61,15 @@ def _mean(values: Iterable[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+def _std(values: Iterable[float]) -> float:
+    values = list(values)
+    if len(values) < 2:
+        return 0.0
+    mean = sum(values) / len(values)
+    variance = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
+    return variance ** 0.5
+
+
 def _write_json(path: Path, payload: Mapping) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2))
@@ -195,6 +204,8 @@ def _summarize_quality_rows(rows: List[dict]) -> List[dict]:
                 "mean_em": _mean(row["em"] for row in group),
                 "mean_f1": _mean(row["f1"] for row in group),
                 "mean_headline_score": _mean(row["headline_score"] for row in group),
+                "f1_std": _std(row["f1"] for row in group),
+                "em_std": _std(row["em"] for row in group),
                 "cache_nbytes_mean": _mean(row["cache_nbytes"] for row in group),
                 "peak_memory_delta_bytes_mean": _mean(row["peak_memory_delta_bytes"] for row in group),
                 "prefill_seconds_mean": _mean(row["prefill_seconds"] for row in group),
@@ -217,6 +228,7 @@ def _summarize_needle_rows(rows: List[dict]) -> List[dict]:
                 "context_tier": context_tier,
                 "examples": len(group),
                 "accuracy_mean": _mean(row["correct"] for row in group),
+                "accuracy_std": _std(row["correct"] for row in group),
                 "cache_nbytes_mean": _mean(row["cache_nbytes"] for row in group),
                 "peak_memory_delta_bytes_mean": _mean(row["peak_memory_delta_bytes"] for row in group),
             }
@@ -335,17 +347,38 @@ def _build_acceptance_summary(
         )
         qa_f1_delta = quality_headline["mean_f1"] - quality_standard["mean_f1"]
         needle_delta = needle_headline["accuracy_mean"] - needle_standard["accuracy_mean"]
+
+        # 95% lower bound on each delta = mean - 1.96 * SE(delta), where
+        # SE(delta) = sqrt(SE_h^2 + SE_s^2) under the independent-samples assumption.
+        n_q_h = max(quality_headline.get("examples", 1), 1)
+        n_q_s = max(quality_standard.get("examples", 1), 1)
+        se_qa = (
+            (quality_headline.get("f1_std", 0.0) ** 2) / n_q_h
+            + (quality_standard.get("f1_std", 0.0) ** 2) / n_q_s
+        ) ** 0.5
+        qa_f1_delta_lower = qa_f1_delta - 1.96 * se_qa
+
+        n_n_h = max(needle_headline.get("examples", 1), 1)
+        n_n_s = max(needle_standard.get("examples", 1), 1)
+        se_needle = (
+            (needle_headline.get("accuracy_std", 0.0) ** 2) / n_n_h
+            + (needle_standard.get("accuracy_std", 0.0) ** 2) / n_n_s
+        ) ** 0.5
+        needle_delta_lower = needle_delta - 1.96 * se_needle
+
         tier_pass = (
             cache_reduction >= CACHE_REDUCTION_THRESHOLD
-            and qa_f1_delta >= QA_F1_DELTA_THRESHOLD
-            and needle_delta >= NEEDLE_DELTA_THRESHOLD
+            and qa_f1_delta_lower >= QA_F1_DELTA_THRESHOLD
+            and needle_delta_lower >= NEEDLE_DELTA_THRESHOLD
         )
         per_tier.append(
             {
                 "context_tier": tier,
                 "cache_reduction": cache_reduction,
                 "qa_f1_delta": qa_f1_delta,
+                "qa_f1_delta_lower_95": qa_f1_delta_lower,
                 "needle_accuracy_delta": needle_delta,
+                "needle_accuracy_delta_lower_95": needle_delta_lower,
                 "pass": tier_pass,
             }
         )
@@ -527,13 +560,17 @@ def _generate_plots(
     mode_labels = {row["mode_slug"]: row["mode_label"] for row in quality_summary}
 
     quality_series = {}
+    quality_std = {}
     cache_series = {}
     needle_series = {}
+    needle_std = {}
     for mode_slug in mode_order:
         label = mode_labels[mode_slug]
         quality_series[label] = _series_from_index(quality_index, mode_slug=mode_slug, tiers=tiers, field="mean_f1")
+        quality_std[label] = _series_from_index(quality_index, mode_slug=mode_slug, tiers=tiers, field="f1_std")
         cache_series[label] = _series_from_index(quality_index, mode_slug=mode_slug, tiers=tiers, field="cache_nbytes_mean")
         needle_series[label] = _series_from_index(needle_index, mode_slug=mode_slug, tiers=tiers, field="accuracy_mean")
+        needle_std[label] = _series_from_index(needle_index, mode_slug=mode_slug, tiers=tiers, field="accuracy_std")
 
     tradeoff_points = []
     for row in quality_summary:
@@ -551,8 +588,9 @@ def _generate_plots(
             "Quality vs Context Length",
             quality_series,
             tier_labels,
-            subtitle="Mean token-F1 on curated long-context QA tasks",
+            subtitle="Mean token-F1 on curated long-context QA tasks (error bars: std across examples per tier)",
             y_label="Mean F1",
+            std_series=quality_std,
         )
     )
     (plots_dir / "cache_bytes_vs_context.svg").write_text(
@@ -578,9 +616,10 @@ def _generate_plots(
             "Needle Accuracy vs Context Length",
             needle_series,
             tier_labels,
-            subtitle="Structured short-answer recall under long context",
+            subtitle="Structured short-answer recall under long context (error bars: std across positions × seeds)",
             y_label="Accuracy",
             zero_baseline=True,
+            std_series=needle_std,
         )
     )
 
@@ -643,8 +682,8 @@ def _write_annotations(
         "## Acceptance Thresholds",
         "",
         f"- Cache reduction (FP16 baseline / TurboQuant cache) must be at least `{acceptance['cache_reduction_threshold']:.2f}x`.",
-        f"- QA token-F1 delta (headline - standard) must be at least `{acceptance['qa_f1_delta_threshold']:.3f}` (i.e. drop of at most `{-acceptance['qa_f1_delta_threshold']:.3f}`).",
-        f"- Needle accuracy delta (headline - standard) must be at least `{acceptance['needle_accuracy_delta_threshold']:.3f}` (i.e. drop of at most `{-acceptance['needle_accuracy_delta_threshold']:.3f}`).",
+        f"- QA token-F1 delta (headline - standard), 95% lower bound must be at least `{acceptance['qa_f1_delta_threshold']:.3f}` (drop bounded above by `{-acceptance['qa_f1_delta_threshold']:.3f}`).",
+        f"- Needle accuracy delta (headline - standard), 95% lower bound must be at least `{acceptance['needle_accuracy_delta_threshold']:.3f}` (drop bounded above by `{-acceptance['needle_accuracy_delta_threshold']:.3f}`).",
         "",
         "All three conditions must hold per tier; overall PASS requires every tier to pass.",
         "",
@@ -653,7 +692,12 @@ def _write_annotations(
     ]
     for row in acceptance["per_tier"]:
         summary_lines.append(
-            f"- `{row['context_tier']}` tokens: cache reduction `{row['cache_reduction']:.2f}x`, QA F1 delta `{row['qa_f1_delta']:.3f}`, Needle delta `{row['needle_accuracy_delta']:.3f}`, pass=`{row['pass']}`"
+            f"- `{row['context_tier']}` tokens: cache reduction `{row['cache_reduction']:.2f}x`, "
+            f"QA F1 delta `{row['qa_f1_delta']:.3f}` "
+            f"(95% lower bound `{row.get('qa_f1_delta_lower_95', row['qa_f1_delta']):.3f}`), "
+            f"Needle delta `{row['needle_accuracy_delta']:.3f}` "
+            f"(95% lower bound `{row.get('needle_accuracy_delta_lower_95', row['needle_accuracy_delta']):.3f}`), "
+            f"pass=`{row['pass']}`"
         )
     summary_lines.extend(
         [
