@@ -265,6 +265,20 @@ def _find_summary_row(summary: List[dict], *, mode_slug: str, context_tier: int)
     return None
 
 
+def _index_summary(summary: List[dict]) -> dict[tuple[str, int], dict]:
+    return {(row["mode_slug"], row["context_tier"]): row for row in summary}
+
+
+def _series_from_index(
+    index: dict[tuple[str, int], dict],
+    *,
+    mode_slug: str,
+    tiers: List[int],
+    field: str,
+) -> List[float]:
+    return [index[(mode_slug, tier)][field] for tier in tiers if (mode_slug, tier) in index]
+
+
 def _build_acceptance_summary(
     quality_summary: List[dict],
     needle_summary: List[dict],
@@ -417,21 +431,18 @@ def _generate_plots(
         if row["mode_slug"] not in mode_order:
             mode_order.append(row["mode_slug"])
 
+    quality_index = _index_summary(quality_summary)
+    needle_index = _index_summary(needle_summary)
+    mode_labels = {row["mode_slug"]: row["mode_label"] for row in quality_summary}
+
     quality_series = {}
     cache_series = {}
     needle_series = {}
     for mode_slug in mode_order:
-        mode_rows = [row for row in quality_summary if row["mode_slug"] == mode_slug]
-        mode_label = mode_rows[0]["mode_label"]
-        quality_series[mode_label] = [
-            _find_summary_row(quality_summary, mode_slug=mode_slug, context_tier=tier)["mean_f1"] for tier in tiers
-        ]
-        cache_series[mode_label] = [
-            _find_summary_row(quality_summary, mode_slug=mode_slug, context_tier=tier)["cache_nbytes_mean"] for tier in tiers
-        ]
-        needle_series[mode_label] = [
-            _find_summary_row(needle_summary, mode_slug=mode_slug, context_tier=tier)["accuracy_mean"] for tier in tiers
-        ]
+        label = mode_labels[mode_slug]
+        quality_series[label] = _series_from_index(quality_index, mode_slug=mode_slug, tiers=tiers, field="mean_f1")
+        cache_series[label] = _series_from_index(quality_index, mode_slug=mode_slug, tiers=tiers, field="cache_nbytes_mean")
+        needle_series[label] = _series_from_index(needle_index, mode_slug=mode_slug, tiers=tiers, field="accuracy_mean")
 
     tradeoff_points = []
     for row in quality_summary:
