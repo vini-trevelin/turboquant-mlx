@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -261,6 +260,17 @@ def _summarize_parity_rows(rows: List[dict]) -> List[dict]:
 
 def _index_summary(summary: List[dict]) -> dict[tuple[str, int], dict]:
     return {(row["mode_slug"], row["context_tier"]): row for row in summary}
+
+
+def _swap_latest_symlink(latest: Path, *, target_name: str) -> None:
+    """Point <latest> at <target_name>, refusing to clobber a real directory."""
+    if latest.is_symlink():
+        latest.unlink()
+    elif latest.exists():
+        raise RuntimeError(
+            f"refusing to replace non-symlink {latest!r} with a symlink; remove it manually if intended"
+        )
+    latest.symlink_to(target_name)
 
 
 def _series_from_index(
@@ -765,13 +775,7 @@ def run_report(
         context_tiers=context_tiers,
     )
 
-    latest = output_root / "latest"
-    if latest.exists() or latest.is_symlink():
-        if latest.is_dir() and not latest.is_symlink():
-            shutil.rmtree(latest)
-        else:
-            latest.unlink()
-    latest.symlink_to(result_dir.name)
+    _swap_latest_symlink(output_root / "latest", target_name=result_dir.name)
 
     del standard_model
     del tokenizer
