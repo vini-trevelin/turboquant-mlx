@@ -157,6 +157,7 @@ def run_loaded_needle_case(
         "needle_position_label": case.needle_position_label,
         "needle": case.needle,
         "question": case.question,
+        "seed": case.seed,
         "response": text,
         "normalized_prediction": score.normalized_prediction,
         "normalized_gold": score.normalized_gold,

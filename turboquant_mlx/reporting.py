@@ -22,7 +22,8 @@ from .config import CalibrationArtifact, CalibrationConfig, EvaluationConfig, Tu
 from .longbench import evaluate_longbench_loaded, prepare_longbench_examples
 from .load import load_turboquant
 from .needle import build_needle_case, run_loaded_needle_case
-from .qa_eval import write_jsonl
+from .qa_eval import read_jsonl, write_jsonl
+from .generate import append_jsonl
 from .teacher_forcing import evaluate_teacher_forced_loaded
 
 
@@ -359,6 +360,24 @@ def _log(message: str, *, quiet: bool) -> None:
         print(message, flush=True)
 
 
+def _load_streamed_rows(path: Path) -> List[dict]:
+    if not path.exists():
+        return []
+    return list(read_jsonl(path))
+
+
+def _quality_key(row: Mapping) -> tuple:
+    return (row["mode_slug"], row["context_tier"], row.get("dataset", row.get("dataset_name")), row["index"])
+
+
+def _needle_key(row: Mapping) -> tuple:
+    return (row["mode_slug"], row["context_tier"], row["needle_position_label"], row["seed"])
+
+
+def _parity_key(row: Mapping) -> tuple:
+    return (row["context_tier"], row["dataset"], row["index"])
+
+
 def _run_quality_suite_loaded(
     model,
     tokenizer,
@@ -367,16 +386,25 @@ def _run_quality_suite_loaded(
     *,
     max_tokens: int,
     quiet: bool = False,
+    output_path: Optional[Path] = None,
+    skip_keys: Optional[set] = None,
 ) -> List[dict]:
+    skip_keys = skip_keys or set()
     rows: List[dict] = []
     for tier, datasets in prepared_by_tier.items():
         for dataset_name, prepared_examples in datasets.items():
-            n = len(prepared_examples)
-            _log(f"[quality][{mode.slug}] tier={tier} dataset={dataset_name} examples={n}", quiet=quiet)
+            pending = [ex for ex in prepared_examples if (mode.slug, tier, dataset_name, ex["_index"]) not in skip_keys]
+            if not pending:
+                _log(f"[quality][{mode.slug}] tier={tier} dataset={dataset_name} skipped (resumed)", quiet=quiet)
+                continue
+            _log(
+                f"[quality][{mode.slug}] tier={tier} dataset={dataset_name} examples={len(pending)}/{len(prepared_examples)}",
+                quiet=quiet,
+            )
             result = evaluate_longbench_loaded(
                 model,
                 tokenizer,
-                prepared_examples,
+                pending,
                 max_tokens=max_tokens,
                 turboquant_config=mode.config,
             )
@@ -386,6 +414,8 @@ def _run_quality_suite_loaded(
                 row["context_tier"] = tier
                 row["dataset_name"] = dataset_name
                 rows.append(row)
+                if output_path is not None:
+                    append_jsonl(output_path, row)
     return rows
 
 
@@ -398,12 +428,18 @@ def _run_needle_suite_loaded(
     seeds_per_position: int,
     max_tokens: int,
     quiet: bool = False,
+    output_path: Optional[Path] = None,
+    skip_keys: Optional[set] = None,
 ) -> List[dict]:
+    skip_keys = skip_keys or set()
     rows: List[dict] = []
     for tier in context_tiers:
         _log(f"[needle][{mode.slug}] tier={tier} positions=3 seeds={seeds_per_position}", quiet=quiet)
         for position_label in ("front", "middle", "back"):
             for seed in range(seeds_per_position):
+                key = (mode.slug, tier, position_label, seed)
+                if key in skip_keys:
+                    continue
                 case = build_needle_case(
                     tokenizer,
                     context_tokens=tier,
@@ -424,6 +460,8 @@ def _run_needle_suite_loaded(
                 row["mode_label"] = mode.label
                 row["context_tier"] = tier
                 rows.append(row)
+                if output_path is not None:
+                    append_jsonl(output_path, row)
     return rows
 
 
@@ -435,25 +473,32 @@ def _run_parity_suite(
     context_tiers: List[int],
     examples_per_dataset: int,
     quiet: bool = False,
+    output_path: Optional[Path] = None,
+    skip_keys: Optional[set] = None,
 ) -> List[dict]:
+    skip_keys = skip_keys or set()
     rows: List[dict] = []
     for tier in context_tiers:
         _log(f"[parity] tier={tier}", quiet=quiet)
         for dataset_name, examples in prepared_by_tier[tier].items():
             for example in examples[:examples_per_dataset]:
+                key = (tier, dataset_name, example["_index"])
+                if key in skip_keys:
+                    continue
                 metrics = evaluate_teacher_forced_loaded(
                     standard_model,
                     headline_model,
                     example["_prompt_tokens"],
                 )
-                rows.append(
-                    {
-                        "context_tier": tier,
-                        "dataset": dataset_name,
-                        "index": example["_index"],
-                        **metrics.to_dict(),
-                    }
-                )
+                row = {
+                    "context_tier": tier,
+                    "dataset": dataset_name,
+                    "index": example["_index"],
+                    **metrics.to_dict(),
+                }
+                rows.append(row)
+                if output_path is not None:
+                    append_jsonl(output_path, row)
     return rows
 
 
@@ -643,6 +688,7 @@ def run_report(
     headline_only: bool = False,
     quiet: bool = False,
     seed: int = 0,
+    resume_from: Optional[Path] = None,
     provenance: Optional[dict] = None,
 ) -> Path:
     set_global_seed(seed)
@@ -650,14 +696,35 @@ def run_report(
     quality_datasets = quality_datasets or list(DEFAULT_QUALITY_DATASETS)
     calibration_datasets = calibration_datasets or list(DEFAULT_CALIBRATION_DATASETS)
 
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    result_dir = output_root / timestamp
+    if resume_from is not None:
+        result_dir = Path(resume_from)
+        if not result_dir.exists():
+            raise FileNotFoundError(f"--resume target does not exist: {result_dir}")
+        timestamp = result_dir.name
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        result_dir = output_root / timestamp
     raw_dir = result_dir / "raw"
     plots_dir = result_dir / "plots"
     annotations_dir = result_dir / "annotations"
     raw_dir.mkdir(parents=True, exist_ok=True)
     plots_dir.mkdir(parents=True, exist_ok=True)
     annotations_dir.mkdir(parents=True, exist_ok=True)
+
+    quality_jsonl = raw_dir / "quality_rows.jsonl"
+    needle_jsonl = raw_dir / "needle_rows.jsonl"
+    parity_jsonl = raw_dir / "parity_rows.jsonl"
+    quality_rows = _load_streamed_rows(quality_jsonl) if resume_from else []
+    needle_rows = _load_streamed_rows(needle_jsonl) if resume_from else []
+    parity_rows = _load_streamed_rows(parity_jsonl) if resume_from else []
+    quality_skip = {_quality_key(r) for r in quality_rows}
+    needle_skip = {_needle_key(r) for r in needle_rows}
+    parity_skip = {_parity_key(r) for r in parity_rows}
+    if resume_from:
+        _log(
+            f"[resume] loaded quality={len(quality_rows)} needle={len(needle_rows)} parity={len(parity_rows)} from {result_dir}",
+            quiet=quiet,
+        )
 
     standard_model, tokenizer = load_turboquant(model, turboquant_config=None)
     prepared_by_tier = _prepare_quality_slices(
@@ -689,22 +756,30 @@ def run_report(
     artifact.save(calibration_artifact_path)
 
     modes = _mode_specs(artifact.head_dim, calibration_artifact_path, headline_only=headline_only)
-    quality_rows = _run_quality_suite_loaded(
-        standard_model,
-        tokenizer,
-        modes[0],
-        prepared_by_tier,
-        max_tokens=quality_max_tokens,
-        quiet=quiet,
+    quality_rows.extend(
+        _run_quality_suite_loaded(
+            standard_model,
+            tokenizer,
+            modes[0],
+            prepared_by_tier,
+            max_tokens=quality_max_tokens,
+            quiet=quiet,
+            output_path=quality_jsonl,
+            skip_keys=quality_skip,
+        )
     )
-    needle_rows = _run_needle_suite_loaded(
-        standard_model,
-        tokenizer,
-        modes[0],
-        context_tiers=context_tiers,
-        seeds_per_position=needle_seeds_per_position,
-        max_tokens=needle_max_tokens,
-        quiet=quiet,
+    needle_rows.extend(
+        _run_needle_suite_loaded(
+            standard_model,
+            tokenizer,
+            modes[0],
+            context_tiers=context_tiers,
+            seeds_per_position=needle_seeds_per_position,
+            max_tokens=needle_max_tokens,
+            quiet=quiet,
+            output_path=needle_jsonl,
+            skip_keys=needle_skip,
+        )
     )
 
     # Free the standard model before loading the headline model so we never hold
@@ -724,6 +799,8 @@ def run_report(
             prepared_by_tier,
             max_tokens=quality_max_tokens,
             quiet=quiet,
+            output_path=quality_jsonl,
+            skip_keys=quality_skip,
         )
     )
     needle_rows.extend(
@@ -735,17 +812,23 @@ def run_report(
             seeds_per_position=needle_seeds_per_position,
             max_tokens=needle_max_tokens,
             quiet=quiet,
+            output_path=needle_jsonl,
+            skip_keys=needle_skip,
         )
     )
 
     standard_model_for_parity, _ = load_turboquant(model, turboquant_config=None)
-    parity_rows = _run_parity_suite(
-        standard_model_for_parity,
-        headline_model,
-        prepared_by_tier,
-        context_tiers=context_tiers,
-        examples_per_dataset=parity_examples_per_dataset,
-        quiet=quiet,
+    parity_rows.extend(
+        _run_parity_suite(
+            standard_model_for_parity,
+            headline_model,
+            prepared_by_tier,
+            context_tiers=context_tiers,
+            examples_per_dataset=parity_examples_per_dataset,
+            quiet=quiet,
+            output_path=parity_jsonl,
+            skip_keys=parity_skip,
+        )
     )
     del standard_model_for_parity
     mx.clear_cache()
@@ -763,6 +846,8 @@ def run_report(
                     prepared_by_tier,
                     max_tokens=quality_max_tokens,
                     quiet=quiet,
+                    output_path=quality_jsonl,
+                    skip_keys=quality_skip,
                 )
             )
             needle_rows.extend(
@@ -774,16 +859,14 @@ def run_report(
                     seeds_per_position=needle_seeds_per_position,
                     max_tokens=needle_max_tokens,
                     quiet=quiet,
+                    output_path=needle_jsonl,
+                    skip_keys=needle_skip,
                 )
             )
         finally:
             del loaded_model
             del loaded_tokenizer
             mx.clear_cache()
-
-    write_jsonl(raw_dir / "quality_rows.jsonl", quality_rows)
-    write_jsonl(raw_dir / "needle_rows.jsonl", needle_rows)
-    write_jsonl(raw_dir / "parity_rows.jsonl", parity_rows)
 
     quality_summary = _summarize_quality_rows(quality_rows)
     needle_summary = _summarize_needle_rows(needle_rows)
@@ -863,6 +946,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--headline-only", action="store_true")
     parser.add_argument("--quiet", action="store_true", help="Suppress per-tier/per-dataset progress lines")
     parser.add_argument("--seed", type=int, default=0, help="Master seed; threaded through every RNG.")
+    parser.add_argument(
+        "--resume",
+        default=None,
+        help="Path to an existing result directory to continue. Re-uses its raw_rows JSONL, "
+        "skips already-completed examples, and writes additional outputs into the same dir.",
+    )
     return parser
 
 
@@ -885,6 +974,7 @@ def main() -> None:
         headline_only=args.headline_only,
         quiet=args.quiet,
         seed=args.seed,
+        resume_from=Path(args.resume) if args.resume else None,
         provenance=provenance,
     )
     print(result_dir)
