@@ -184,8 +184,6 @@ def _summarize_quality_rows(rows: List[dict]) -> List[dict]:
                 "mean_em": _mean(row["em"] for row in group),
                 "mean_f1": _mean(row["f1"] for row in group),
                 "mean_headline_score": _mean(row["headline_score"] for row in group),
-                "prompt_tps_mean": _mean(row["prompt_tps"] for row in group),
-                "generation_tps_mean": _mean(row["generation_tps"] for row in group),
                 "cache_nbytes_mean": _mean(row["cache_nbytes"] for row in group),
                 "peak_memory_delta_bytes_mean": _mean(row["peak_memory_delta_bytes"] for row in group),
                 "prefill_seconds_mean": _mean(row["prefill_seconds"] for row in group),
@@ -208,8 +206,6 @@ def _summarize_needle_rows(rows: List[dict]) -> List[dict]:
                 "context_tier": context_tier,
                 "examples": len(group),
                 "accuracy_mean": _mean(row["correct"] for row in group),
-                "prompt_tps_mean": _mean(row["prompt_tps"] for row in group),
-                "generation_tps_mean": _mean(row["generation_tps"] for row in group),
                 "cache_nbytes_mean": _mean(row["cache_nbytes"] for row in group),
                 "peak_memory_delta_bytes_mean": _mean(row["peak_memory_delta_bytes"] for row in group),
             }

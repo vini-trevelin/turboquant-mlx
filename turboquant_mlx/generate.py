@@ -48,8 +48,6 @@ class RunMetrics:
     generated_tokens: int
     prefill_seconds: float
     decode_seconds: float
-    prompt_tps: float
-    generation_tps: float
     cache_nbytes: int
     active_memory_before_bytes: int
     active_memory_after_bytes: int
@@ -169,8 +167,6 @@ def run_generation(
         generated_tokens=len(generated),
         prefill_seconds=prefill_seconds,
         decode_seconds=decode_seconds,
-        prompt_tps=len(prompt_tokens) / prefill_seconds,
-        generation_tps=len(generated) / decode_seconds if generated else 0.0,
         cache_nbytes=_estimate_cache_nbytes(prompt_cache),
         active_memory_before_bytes=active_memory_before,
         active_memory_after_bytes=active_memory_after,
