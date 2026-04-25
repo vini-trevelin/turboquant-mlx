@@ -45,6 +45,43 @@ The current implementation also supports an optional QJL-style residual correcti
 `--output-root` / `--longbench-source-dir`, or with the environment variables
 `TURBOQUANT_OUTPUT_ROOT` / `TURBOQUANT_LONGBENCH_DIR`.
 
+## Before You Run a Benchmark
+
+- Wipe `./results/` (or any earlier `--output-root`) before believing any
+  `preset_*_qjl` numbers produced before the QJL projection-basis fix landed.
+  The QJL correction was being applied in the wrong basis, which inflated
+  attention error rather than reducing it; every prior `preset_*_qjl` row is
+  invalidated.
+- Re-run the calibration step (or rely on the new on-disk cache, see below).
+
+## Knobs Worth Knowing
+
+- `--seed N` — master seed threaded through Python `random`, NumPy, and MLX
+  via `turboquant_mlx._seed.set_global_seed`. Decoding is greedy, so the
+  visible effect is mostly on the needle prompt construction.
+- `--quiet` — silences per-(mode, tier, dataset) progress prints. Default is
+  verbose so a long run is obviously alive.
+- `--resume <result_dir>` — continue a previous run that was killed
+  mid-execution. The streamed `raw/*.jsonl` files act as a resume log; any
+  `(mode, tier, dataset, index)` (or per-position-seed for needle) already
+  present is skipped.
+- Calibration is now cached on disk under
+  `<output_root>/.calibration_cache/<model>/`. The cache key covers
+  `(model, head_dim, outlier_count, quantile, calibration_text_hashes)`, so
+  any change forces a recompute; reusing the same model + texts is
+  instantaneous.
+
+## What's in `summary.json`
+
+Every report stamps a top-level `provenance` block with `git_sha`, the
+parsed CLI args, and the active `mlx` / `mlx-lm` / `numpy` / Python versions,
+so two timestamped runs are never ambiguous about which code revision
+produced them.
+
+The acceptance gate compares the 95% lower bound of each metric delta
+(headline minus standard) against a documented threshold; thresholds are
+named module-level constants in `turboquant_mlx/reporting.py` and printed
+in `annotations/SUMMARY.md`.
 
 ![image.png](docs/image.png)
 
