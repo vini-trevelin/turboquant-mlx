@@ -400,11 +400,15 @@ def score_queries_against_keys(
 
     prepared_queries = []
     for subset in setup.subsets:
-        query_subset = mx.take(grouped_queries, subset.indices_mx, axis=-1)
-        rotated_query = mx.matmul(query_subset.astype(mx.float32), subset.rotation_mx)
+        query_subset = mx.take(grouped_queries, subset.indices_mx, axis=-1).astype(mx.float32)
+        rotated_query = mx.matmul(query_subset, subset.rotation_mx)
         projected_query = None
         if apply_qjl and subset.projection_mx is not None:
-            projected_query = mx.matmul(rotated_query, subset.projection_mx)
+            # Residual signs are computed in the original (un-rotated) basis
+            # (see _quantize_subset: residual = unit - approx_unit, both pre-rotation).
+            # The QJL projection must be applied in the same basis, so use
+            # query_subset rather than rotated_query.
+            projected_query = mx.matmul(query_subset, subset.projection_mx)
         prepared_queries.append((rotated_query, projected_query))
 
     chunk_scores = []

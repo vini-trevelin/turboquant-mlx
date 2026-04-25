@@ -116,6 +116,25 @@ def test_chunked_compressed_attention_matches_dense_reference():
     assert np.allclose(np.asarray(compressed_out), np.asarray(dense_out), atol=1e-4)
 
 
+def test_qjl_oracle_reduces_score_error():
+    config = TurboQuantConfig(mode="core", head_dim=16, core_bits=2, qjl_enabled=True, qjl_dim=4096)
+    setup = SharedTurboQuantSetup.from_config(config)
+    rng = np.random.default_rng(17)
+    queries = mx.array(rng.normal(size=(1, 1, 2, 16)).astype(np.float32))
+    keys = mx.array(rng.normal(size=(1, 1, 4, 16)).astype(np.float32))
+    compressed = quantize_tensor(keys, setup, with_qjl=True)
+
+    dense = mx.matmul(queries, keys.transpose(0, 1, 3, 2))
+    no_qjl = score_queries_against_keys(queries, compressed, setup, scale=1.0, apply_qjl=False)
+    with_qjl = score_queries_against_keys(queries, compressed, setup, scale=1.0, apply_qjl=True)
+
+    err_no_qjl = float(mx.mean(mx.abs(no_qjl - dense)))
+    err_with_qjl = float(mx.mean(mx.abs(with_qjl - dense)))
+    assert err_with_qjl < err_no_qjl * 0.5, (
+        f"QJL must materially reduce score error: no_qjl={err_no_qjl:.4f}, with_qjl={err_with_qjl:.4f}"
+    )
+
+
 def test_qjl_correction_changes_key_scores():
     config = TurboQuantConfig(mode="core", head_dim=8, core_bits=2, qjl_enabled=True, qjl_dim=512)
     setup = SharedTurboQuantSetup.from_config(config)
