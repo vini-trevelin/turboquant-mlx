@@ -16,6 +16,7 @@ from ._charts import bar_chart_svg as _bar_chart_svg
 from ._charts import format_bytes as _format_bytes
 from ._charts import line_chart_svg as _line_chart_svg
 from ._charts import scatter_chart_svg as _scatter_chart_svg
+from ._seed import set_global_seed
 from .calibration import calibrate_outlier_mask
 from .config import CalibrationArtifact, CalibrationConfig, EvaluationConfig, TurboQuantConfig
 from .longbench import evaluate_longbench_loaded, prepare_longbench_examples
@@ -623,8 +624,10 @@ def run_report(
     needle_seeds_per_position: int = 4,
     headline_only: bool = False,
     quiet: bool = False,
+    seed: int = 0,
     provenance: Optional[dict] = None,
 ) -> Path:
+    set_global_seed(seed)
     context_tiers = context_tiers or list(DEFAULT_CONTEXT_TIERS)
     quality_datasets = quality_datasets or list(DEFAULT_QUALITY_DATASETS)
     calibration_datasets = calibration_datasets or list(DEFAULT_CALIBRATION_DATASETS)
@@ -839,6 +842,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--needle-seeds-per-position", type=int, default=4)
     parser.add_argument("--headline-only", action="store_true")
     parser.add_argument("--quiet", action="store_true", help="Suppress per-tier/per-dataset progress lines")
+    parser.add_argument("--seed", type=int, default=0, help="Master seed; threaded through every RNG.")
     return parser
 
 
@@ -860,6 +864,7 @@ def main() -> None:
         needle_seeds_per_position=args.needle_seeds_per_position,
         headline_only=args.headline_only,
         quiet=args.quiet,
+        seed=args.seed,
         provenance=provenance,
     )
     print(result_dir)
