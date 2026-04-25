@@ -304,6 +304,11 @@ def _build_acceptance_summary(
     }
 
 
+def _log(message: str, *, quiet: bool) -> None:
+    if not quiet:
+        print(message, flush=True)
+
+
 def _run_quality_suite_loaded(
     model,
     tokenizer,
@@ -311,10 +316,13 @@ def _run_quality_suite_loaded(
     prepared_by_tier: dict[int, dict[str, List[dict]]],
     *,
     max_tokens: int,
+    quiet: bool = False,
 ) -> List[dict]:
     rows: List[dict] = []
     for tier, datasets in prepared_by_tier.items():
         for dataset_name, prepared_examples in datasets.items():
+            n = len(prepared_examples)
+            _log(f"[quality][{mode.slug}] tier={tier} dataset={dataset_name} examples={n}", quiet=quiet)
             result = evaluate_longbench_loaded(
                 model,
                 tokenizer,
@@ -339,9 +347,11 @@ def _run_needle_suite_loaded(
     context_tiers: List[int],
     seeds_per_position: int,
     max_tokens: int,
+    quiet: bool = False,
 ) -> List[dict]:
     rows: List[dict] = []
     for tier in context_tiers:
+        _log(f"[needle][{mode.slug}] tier={tier} positions=3 seeds={seeds_per_position}", quiet=quiet)
         for position_label in ("front", "middle", "back"):
             for seed in range(seeds_per_position):
                 case = build_needle_case(
@@ -374,9 +384,11 @@ def _run_parity_suite(
     *,
     context_tiers: List[int],
     examples_per_dataset: int,
+    quiet: bool = False,
 ) -> List[dict]:
     rows: List[dict] = []
     for tier in context_tiers:
+        _log(f"[parity] tier={tier}", quiet=quiet)
         for dataset_name, examples in prepared_by_tier[tier].items():
             for example in examples[:examples_per_dataset]:
                 metrics = evaluate_teacher_forced_loaded(
@@ -572,6 +584,7 @@ def run_report(
     needle_max_tokens: int = 12,
     needle_seeds_per_position: int = 4,
     headline_only: bool = False,
+    quiet: bool = False,
 ) -> Path:
     context_tiers = context_tiers or list(DEFAULT_CONTEXT_TIERS)
     quality_datasets = quality_datasets or list(DEFAULT_QUALITY_DATASETS)
@@ -620,6 +633,7 @@ def run_report(
         modes[0],
         prepared_by_tier,
         max_tokens=quality_max_tokens,
+        quiet=quiet,
     )
     needle_rows = _run_needle_suite_loaded(
         standard_model,
@@ -628,6 +642,7 @@ def run_report(
         context_tiers=context_tiers,
         seeds_per_position=needle_seeds_per_position,
         max_tokens=needle_max_tokens,
+        quiet=quiet,
     )
 
     # Free the standard model before loading the headline model so we never hold
@@ -646,6 +661,7 @@ def run_report(
             headline_mode,
             prepared_by_tier,
             max_tokens=quality_max_tokens,
+            quiet=quiet,
         )
     )
     needle_rows.extend(
@@ -656,6 +672,7 @@ def run_report(
             context_tiers=context_tiers,
             seeds_per_position=needle_seeds_per_position,
             max_tokens=needle_max_tokens,
+            quiet=quiet,
         )
     )
 
@@ -666,6 +683,7 @@ def run_report(
         prepared_by_tier,
         context_tiers=context_tiers,
         examples_per_dataset=parity_examples_per_dataset,
+        quiet=quiet,
     )
     del standard_model_for_parity
     mx.clear_cache()
@@ -682,6 +700,7 @@ def run_report(
                     mode,
                     prepared_by_tier,
                     max_tokens=quality_max_tokens,
+                    quiet=quiet,
                 )
             )
             needle_rows.extend(
@@ -692,6 +711,7 @@ def run_report(
                     context_tiers=context_tiers,
                     seeds_per_position=needle_seeds_per_position,
                     max_tokens=needle_max_tokens,
+                    quiet=quiet,
                 )
             )
         finally:
@@ -778,6 +798,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--needle-max-tokens", type=int, default=12)
     parser.add_argument("--needle-seeds-per-position", type=int, default=4)
     parser.add_argument("--headline-only", action="store_true")
+    parser.add_argument("--quiet", action="store_true", help="Suppress per-tier/per-dataset progress lines")
     return parser
 
 
@@ -797,6 +818,7 @@ def main() -> None:
         needle_max_tokens=args.needle_max_tokens,
         needle_seeds_per_position=args.needle_seeds_per_position,
         headline_only=args.headline_only,
+        quiet=args.quiet,
     )
     print(result_dir)
 
