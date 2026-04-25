@@ -30,6 +30,13 @@ DEFAULT_QUALITY_DATASETS = ["triviaqa_e", "hotpotqa_e", "2wikimqa_e"]
 DEFAULT_CALIBRATION_DATASETS = ["multifieldqa_en", "multi_news"]
 DEFAULT_CONTEXT_TIERS = [512, 2048, 4096]
 
+# Acceptance thresholds for the headline (Preset 3.5 + QJL) vs Standard KV claim.
+# Calibrated against the Llama-3.2-3B preset 3.5 + QJL profile; revisit if the
+# headline mode or model class changes.
+CACHE_REDUCTION_THRESHOLD = 3.0   # standard cache bytes / headline cache bytes
+QA_F1_DELTA_THRESHOLD = -0.03     # headline F1 - standard F1, must be >= this
+NEEDLE_DELTA_THRESHOLD = -0.02    # headline accuracy - standard accuracy
+
 
 @dataclass(frozen=True)
 class ModeSpec:
@@ -322,7 +329,11 @@ def _build_acceptance_summary(
         )
         qa_f1_delta = quality_headline["mean_f1"] - quality_standard["mean_f1"]
         needle_delta = needle_headline["accuracy_mean"] - needle_standard["accuracy_mean"]
-        tier_pass = cache_reduction >= 3.0 and qa_f1_delta >= -0.03 and needle_delta >= -0.02
+        tier_pass = (
+            cache_reduction >= CACHE_REDUCTION_THRESHOLD
+            and qa_f1_delta >= QA_F1_DELTA_THRESHOLD
+            and needle_delta >= NEEDLE_DELTA_THRESHOLD
+        )
         per_tier.append(
             {
                 "context_tier": tier,
@@ -336,9 +347,9 @@ def _build_acceptance_summary(
     return {
         "headline_mode_slug": headline_mode_slug,
         "overall_pass": overall_pass,
-        "cache_reduction_threshold": 3.0,
-        "qa_f1_delta_threshold": -0.03,
-        "needle_accuracy_delta_threshold": -0.02,
+        "cache_reduction_threshold": CACHE_REDUCTION_THRESHOLD,
+        "qa_f1_delta_threshold": QA_F1_DELTA_THRESHOLD,
+        "needle_accuracy_delta_threshold": NEEDLE_DELTA_THRESHOLD,
         "per_tier": per_tier,
     }
 
@@ -499,7 +510,7 @@ def _generate_plots(
             "Observed Cache Bytes vs Context Length",
             cache_series,
             tier_labels,
-            subtitle="Mean observed prompt cache bytes (lower is better)",
+            subtitle="FP16 mlx-lm KV cache vs TurboQuant packed cache (lower is better)",
             y_label="Cache size",
             formatter=_format_bytes,
             zero_baseline=True,
@@ -564,6 +575,14 @@ def _write_annotations(
         "",
         "`Preset 3.5 + QJL` should use materially less KV-cache memory than `Standard KV` while keeping quality within a small drop.",
         "",
+        "## Acceptance Thresholds",
+        "",
+        f"- Cache reduction (FP16 baseline / TurboQuant cache) must be at least `{acceptance['cache_reduction_threshold']:.2f}x`.",
+        f"- QA token-F1 delta (headline - standard) must be at least `{acceptance['qa_f1_delta_threshold']:.3f}` (i.e. drop of at most `{-acceptance['qa_f1_delta_threshold']:.3f}`).",
+        f"- Needle accuracy delta (headline - standard) must be at least `{acceptance['needle_accuracy_delta_threshold']:.3f}` (i.e. drop of at most `{-acceptance['needle_accuracy_delta_threshold']:.3f}`).",
+        "",
+        "All three conditions must hold per tier; overall PASS requires every tier to pass.",
+        "",
         "## Acceptance by Context Tier",
         "",
     ]
@@ -578,8 +597,7 @@ def _write_annotations(
             "",
             "- Quality uses curated exact-answer-friendly LongBench datasets with normalized EM and token-F1.",
             "- Needle uses canonical short-answer matching, including numeric recovery such as `314159` for the launch-code prompt.",
-            "- Memory proof should be read primarily from `cache_nbytes` and secondarily from per-run peak-memory delta.",
-            "- Throughput is reported for visibility, but it is not a pass/fail gate in this phase.",
+            "- Memory proof should be read primarily from `cache_nbytes` (the on-device packed cache size) compared to the FP16 mlx-lm KV cache baseline. `peak_memory_delta_bytes` is a noisier secondary signal.",
         ]
     )
     if smallest_cache is not None:
