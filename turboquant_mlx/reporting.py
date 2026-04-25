@@ -259,13 +259,6 @@ def _summarize_parity_rows(rows: List[dict]) -> List[dict]:
     return summary
 
 
-def _find_summary_row(summary: List[dict], *, mode_slug: str, context_tier: int) -> Optional[dict]:
-    for row in summary:
-        if row.get("mode_slug") == mode_slug and row.get("context_tier") == context_tier:
-            return row
-    return None
-
-
 def _index_summary(summary: List[dict]) -> dict[tuple[str, int], dict]:
     return {(row["mode_slug"], row["context_tier"]): row for row in summary}
 
@@ -288,13 +281,15 @@ def _build_acceptance_summary(
     standard_mode_slug: str = "standard",
 ) -> dict:
     context_tiers = sorted({row["context_tier"] for row in quality_summary})
+    quality_index = _index_summary(quality_summary)
+    needle_index = _index_summary(needle_summary)
     per_tier = []
     overall_pass = True
     for tier in context_tiers:
-        quality_standard = _find_summary_row(quality_summary, mode_slug=standard_mode_slug, context_tier=tier)
-        quality_headline = _find_summary_row(quality_summary, mode_slug=headline_mode_slug, context_tier=tier)
-        needle_standard = _find_summary_row(needle_summary, mode_slug=standard_mode_slug, context_tier=tier)
-        needle_headline = _find_summary_row(needle_summary, mode_slug=headline_mode_slug, context_tier=tier)
+        quality_standard = quality_index.get((standard_mode_slug, tier))
+        quality_headline = quality_index.get((headline_mode_slug, tier))
+        needle_standard = needle_index.get((standard_mode_slug, tier))
+        needle_headline = needle_index.get((headline_mode_slug, tier))
         if not all([quality_standard, quality_headline, needle_standard, needle_headline]):
             continue
 
