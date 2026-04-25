@@ -19,10 +19,12 @@ from .quantizer import (
 
 
 def _concat_optional(existing: Optional[mx.array], new: Optional[mx.array], axis: int) -> Optional[mx.array]:
-    if new is None:
-        return existing
-    if existing is None:
-        return new
+    if existing is None and new is None:
+        return None
+    if existing is None or new is None:
+        # Mixing chunks with and without QJL residuals would silently desync the
+        # per-chunk sequence_length tracked by norms vs residual tensors.
+        raise ValueError("cannot merge chunks with mismatched residual state (QJL on/off mid-cache)")
     return mx.concatenate([existing, new], axis=axis)
 
 
