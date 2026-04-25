@@ -11,6 +11,7 @@ from typing import Iterable, List, Mapping, Optional
 import mlx.core as mx
 
 from ._charts import bar_chart_svg as _bar_chart_svg
+from ._charts import format_bytes as _format_bytes
 from ._charts import line_chart_svg as _line_chart_svg
 from ._charts import scatter_chart_svg as _scatter_chart_svg
 from .calibration import calibrate_outlier_mask
@@ -461,6 +462,7 @@ def _generate_plots(
             quality_series,
             tier_labels,
             subtitle="Mean token-F1 on curated long-context QA tasks",
+            y_label="Mean F1",
         )
     )
     (plots_dir / "cache_bytes_vs_context.svg").write_text(
@@ -468,15 +470,17 @@ def _generate_plots(
             "Observed Cache Bytes vs Context Length",
             cache_series,
             tier_labels,
-            subtitle="Mean observed prompt cache bytes",
-            formatter=lambda value: f"{int(value):,}",
+            subtitle="Mean observed prompt cache bytes (lower is better)",
+            y_label="Cache size",
+            formatter=_format_bytes,
+            zero_baseline=True,
         )
     )
     (plots_dir / "quality_memory_tradeoff.svg").write_text(
         _scatter_chart_svg(
             "Quality vs Memory Tradeoff",
             tradeoff_points,
-            subtitle="Each point is a mode/context-tier mean",
+            subtitle="Each point is a mode at a context tier — top-left is best",
         )
     )
     (plots_dir / "needle_accuracy_vs_context.svg").write_text(
@@ -484,7 +488,9 @@ def _generate_plots(
             "Needle Accuracy vs Context Length",
             needle_series,
             tier_labels,
-            subtitle="Structured short-answer matching",
+            subtitle="Structured short-answer recall under long context",
+            y_label="Accuracy",
+            zero_baseline=True,
         )
     )
 
@@ -494,7 +500,9 @@ def _generate_plots(
                 "Teacher-Forced KL vs Context Length",
                 tier_labels,
                 [row["kl_divergence_mean"] for row in parity_summary],
-                subtitle="Standard KV vs Preset 3.5 + QJL",
+                subtitle="Standard KV vs Preset 3.5 + QJL (lower is closer)",
+                x_label="Context length (tokens)",
+                y_label="Mean KL divergence",
                 color="#0F766E",
             )
         )
