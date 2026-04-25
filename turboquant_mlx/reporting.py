@@ -634,6 +634,13 @@ def run_report(
         max_tokens=needle_max_tokens,
     )
 
+    # Free the standard model before loading the headline model so we never hold
+    # both fp16 weight sets in memory at once. Standard is reloaded later just
+    # for the parity pass, which is short.
+    del standard_model
+    del tokenizer
+    mx.clear_cache()
+
     headline_mode = next(mode for mode in modes if mode.headline)
     headline_model, headline_tokenizer = load_turboquant(model, turboquant_config=headline_mode.config)
     quality_rows.extend(
@@ -655,13 +662,17 @@ def run_report(
             max_tokens=needle_max_tokens,
         )
     )
+
+    standard_model_for_parity, _ = load_turboquant(model, turboquant_config=None)
     parity_rows = _run_parity_suite(
-        standard_model,
+        standard_model_for_parity,
         headline_model,
         prepared_by_tier,
         context_tiers=context_tiers,
         examples_per_dataset=parity_examples_per_dataset,
     )
+    del standard_model_for_parity
+    mx.clear_cache()
 
     for mode in modes:
         if mode.slug in {modes[0].slug, headline_mode.slug}:
@@ -742,8 +753,6 @@ def run_report(
 
     _swap_latest_symlink(output_root / "latest", target_name=result_dir.name)
 
-    del standard_model
-    del tokenizer
     del headline_model
     del headline_tokenizer
     mx.clear_cache()
