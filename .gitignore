@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .DS_Store
-
+*.txt
 assets/longbench/data/
 results/
+turboquant_mlx.egg-info/PKG-INFO
