@@ -2,7 +2,7 @@
 
 Local MLX research repo for **TurboQuant-style KV-cache compression** on **Llama-family models**.
 
-This project implements a repo-local Llama adapter, a custom packed TurboQuant cache, compressed-domain attention, offline outlier-mask calibration, and a small evaluation harness for long-context experiments on Apple Silicon.
+Repo-local Llama adapter and TurboQuant KV-cache compression, built for inspection and iteration on Apple Silicon.
 
 ## Read This First
 
@@ -22,9 +22,9 @@ External context:
 - Focus: **KV-cache quantization for inference**
 - Backend: **MLX / mlx-lm**
 - Model family: **Llama-compatible models**
-- Design goal: stay close to the TurboQuant paper while keeping the code modular and inspectable
-- The code is written to be easy to inspect and modify first, not to hide the method behind a highly fused abstraction, mainly used into validating the method and understanding its behavior on Apple Silicon.
-- The evaluation harness is intended for local validation and engineering iteration, not as an official paper reproduction claim. It's a sandbox for me to understand the method and its tradeoffs, not a polished artifact for public consumption.
+- Design goal: follow the TurboQuant paper closely; keep code readable and patchable
+- Written to be read, not optimized. No fused kernels hiding the method.
+- The harness is a personal sandbox — not a paper reproduction claim, not production code.
 
 
 This repo does **not** aim to be a generic vector-search implementation or a drop-in patch to your `.venv`.
@@ -62,10 +62,9 @@ parsed CLI args, and the active `mlx` / `mlx-lm` / `numpy` / Python versions,
 so two timestamped runs are never ambiguous about which code revision
 produced them.
 
-The acceptance gate compares the 95% lower bound of each metric delta
-(headline minus standard) against a documented threshold; thresholds are
-named module-level constants in `turboquant_mlx/reporting.py` and printed
-in `annotations/SUMMARY.md`.
+The acceptance gate checks whether the 95% lower bound of (mode − standard)
+clears a threshold. Thresholds are module-level constants in
+`turboquant_mlx/reporting.py`, echoed in `annotations/SUMMARY.md`.
 
 ![image.png](docs/image.png)
 
@@ -121,9 +120,8 @@ Top-1 token agreement stays above 83% at all lengths.
 
 ### Conclusion
 
-Retrieval fidelity (needle) is **fully preserved** at 3.5-bit compression with ~4× cache reduction.
-QA quality at the 4 096-token tier is within tolerance at point-estimate level; the 2 048-tier
-needs more examples to resolve. Perplexity degradation is real (~1.1×) and should be factored
-in for generation-quality sensitive workloads. The 2.5-bit preset is not recommended for
-contexts beyond 2 048 tokens.
+Needle recall is **fully preserved** at 3.5-bit + ~4× cache reduction.
+QA F1 at 4 096 tokens is within the −0.03 threshold; the 2 048-token tier needs more
+examples to settle. Perplexity is ~1.1× higher than standard — real but bounded; matters
+for generation tasks. Don't use the 2.5-bit preset beyond 2 048 tokens.
 
